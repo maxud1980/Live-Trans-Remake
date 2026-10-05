@@ -1,6 +1,6 @@
 {
   "name": "live-trans",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Real-time desktop translator for system audio, powered by Gemini 3.5 Live Translate",
   "main": "out/main/index.js",
   "author": "minhnhat165",
