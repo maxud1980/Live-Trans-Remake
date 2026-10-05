@@ -1,3 +1,10 @@
+## [0.1.8] — 2026-10-05
+
+### Fixed
+- Prevented Chromium's microphone permission flow from appearing again after macOS TCC microphone access has already been granted.
+- Microphone device selection now uses the native macOS consent once, then allows the local renderer to open the granted microphone without additional permission dialogs.
+- System Audio mode remains isolated from microphone permission handling.
+
 ## [0.1.7] — 2026-10-05
 
 ### Fixed
