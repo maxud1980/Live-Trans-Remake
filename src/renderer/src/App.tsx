@@ -1,15 +1,5 @@
 import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import { LANGUAGES, shortLabel } from './lib/languages'
-import {
-  costUsd,
-  formatUsd,
-  formatTokens,
-  formatDuration,
-  estimateAudioSeconds,
-  DEFAULT_INPUT_RATE_PER_M,
-  DEFAULT_OUTPUT_RATE_PER_M,
-  type Usage
-} from './lib/cost'
 import { SystemAudioCapture } from './audio/capture'
 import { MicrophoneAudioCapture } from './audio/microphone'
 import { LiveTranslateClient } from './gemini/liveClient'
@@ -17,8 +7,6 @@ import { LiveTranslateClient } from './gemini/liveClient'
 type Status = 'idle' | 'connecting' | 'listening' | 'error'
 type AudioDevice = { deviceId: string; label: string }
 const SYSTEM_AUDIO_ID = '__system_audio__'
-
-const RATE_KEY = 'live-trans.rates'
 
 // Ko-fi (PayPal-backed, works for Vietnam) — opens in the default browser via the
 // window-open handler. TODO: replace `your-username` with your actual Ko-fi username.
@@ -30,19 +18,6 @@ const MAX_TRANSCRIPT_CHARS = 8000
 function appendCapped(prev: string, addition: string): string {
   const next = prev + addition
   return next.length > MAX_TRANSCRIPT_CHARS ? next.slice(next.length - MAX_TRANSCRIPT_CHARS) : next
-}
-
-function loadRates(): { input: number; output: number } {
-  try {
-    const raw = localStorage.getItem(RATE_KEY)
-    if (raw) {
-      const r = JSON.parse(raw)
-      return { input: Number(r.input), output: Number(r.output) }
-    }
-  } catch {
-    /* ignore */
-  }
-  return { input: DEFAULT_INPUT_RATE_PER_M, output: DEFAULT_OUTPUT_RATE_PER_M }
 }
 
 const STATUS_LABEL: Record<Status, string> = {
@@ -59,20 +34,15 @@ export default function App(): React.JSX.Element {
   const [targetLang, setTargetLang] = useState('en')
   const [audioSourceId, setAudioSourceId] = useState(SYSTEM_AUDIO_ID)
   const [audioDevices, setAudioDevices] = useState<AudioDevice[]>([])
-  const [rates, setRates] = useState(loadRates())
-
   const [status, setStatus] = useState<Status>('idle')
   const [message, setMessage] = useState('')
   const [level, setLevel] = useState(0)
 
-  const [sessionUsage, setSessionUsage] = useState<Usage>({ inputTokens: 0, outputTokens: 0 })
-  const [totalCost, setTotalCost] = useState(0)
   // Transcripts arrive as incremental deltas (small fragments), so we append them.
   // turnComplete is rare/absent for this model; we add a line break when it does arrive.
   const [original, setOriginal] = useState('')
   const [translated, setTranslated] = useState('')
   const [showSettings, setShowSettings] = useState(true)
-  const [showUsage, setShowUsage] = useState(false)
   // macOS uses a hidden-inset title bar (content slides under the traffic lights); Windows/Linux
   // keep the native frame, so we only reserve the traffic-light strip on macOS.
   const [isMac, setIsMac] = useState(false)
@@ -84,7 +54,6 @@ export default function App(): React.JSX.Element {
   const transRef = useRef<HTMLDivElement | null>(null)
 
   const running = status === 'connecting' || status === 'listening'
-  const sessionCost = costUsd(sessionUsage, rates.input, rates.output)
   const targetName = shortLabel(targetLang)
 
   // ---- initial load ----
@@ -95,7 +64,6 @@ export default function App(): React.JSX.Element {
       setSourceLang(s.sourceLang)
       setTargetLang(s.targetLang)
       setAudioSourceId(s.audioSourceId || SYSTEM_AUDIO_ID)
-      setTotalCost(s.totalCostUsd)
       setIsMac(s.platform === 'darwin')
       if (s.hasApiKey) setShowSettings(false)
     })
@@ -130,24 +98,6 @@ export default function App(): React.JSX.Element {
     setMessage(ok ? 'API key saved (encrypted).' : 'Could not save key — OS encryption unavailable.')
   }
 
-  function persistRates(next: { input: number; output: number }): void {
-    setRates(next)
-    localStorage.setItem(RATE_KEY, JSON.stringify(next))
-  }
-
-  const handleUsage = useCallback(
-    (u: Usage) => {
-      // usageMetadata arrives per-message (incremental), so accumulate it.
-      setSessionUsage((prev) => ({
-        inputTokens: prev.inputTokens + u.inputTokens,
-        outputTokens: prev.outputTokens + u.outputTokens
-      }))
-      const cost = costUsd(u, rates.input, rates.output)
-      if (cost > 0) window.api.addTotalCost(cost).then(setTotalCost)
-    },
-    [rates.input, rates.output]
-  )
-
   async function start(): Promise<void> {
     if (!apiKey.trim()) {
       setStatus('error')
@@ -159,7 +109,6 @@ export default function App(): React.JSX.Element {
     setMessage(audioSourceId === SYSTEM_AUDIO_ID ? 'Connecting — preparing system audio…' : 'Connecting — requesting microphone permission…')
     setOriginal('')
     setTranslated('')
-    setSessionUsage({ inputTokens: 0, outputTokens: 0 })
 
     await window.api.ensureAudioPermission()
     await refreshDevices()
@@ -209,7 +158,6 @@ export default function App(): React.JSX.Element {
           setTranslated((p) => (p.endsWith('\n') ? p : p + '\n'))
         },
         onInterrupted: () => {},
-        onUsage: handleUsage,
         onError: (m) => {
           setStatus('error')
           setMessage(m)
@@ -309,13 +257,6 @@ export default function App(): React.JSX.Element {
             <span>Coffee</span>
           </a>
           <button
-            onClick={() => setShowUsage(true)}
-            className="grid h-8 w-8 place-items-center rounded-lg border border-border bg-surface text-muted transition hover:border-border-strong hover:text-foreground"
-            title="Usage"
-          >
-            <ChartIcon />
-          </button>
-          <button
             onClick={() => setShowSettings(true)}
             className="grid h-8 w-8 place-items-center rounded-lg border border-border bg-surface text-muted transition hover:border-border-strong hover:text-foreground"
             title="Settings"
@@ -385,19 +326,8 @@ export default function App(): React.JSX.Element {
           <Meter level={level} active={running} />
         </div>
 
-        <div className="flex items-center gap-6">
-          <Stat
-            label="This session"
-            value={formatUsd(sessionCost)}
-            sub={`${sessionUsage.inputTokens + sessionUsage.outputTokens} tok`}
-          />
-          <div className="h-8 w-px bg-border" />
-          <Stat
-            label="Total spent"
-            value={formatUsd(totalCost)}
-            sub="all time"
-            onReset={async () => setTotalCost(await window.api.resetTotalCost())}
-          />
+        <div className="flex items-center gap-2">
+          {/* Source signal meter remains here as the only live audio-level indicator. */}
         </div>
       </footer>
 
@@ -414,23 +344,10 @@ export default function App(): React.JSX.Element {
           setApiKey={setApiKey}
           keySaved={keySaved}
           saveKey={saveKey}
-          rates={rates}
-          persistRates={persistRates}
         />
       )}
 
       {/* ---- Usage modal ---- */}
-      {showUsage && (
-        <UsageModal
-          onClose={() => setShowUsage(false)}
-          usage={sessionUsage}
-          sessionCost={sessionCost}
-          totalCost={totalCost}
-          rates={rates}
-          running={running}
-          onResetTotal={async () => setTotalCost(await window.api.resetTotalCost())}
-        />
-      )}
     </div>
   )
 }
@@ -515,32 +432,6 @@ function Meter({ level, active }: { level: number; active: boolean }): React.JSX
 
 /* =========================== Stat =========================== */
 
-function Stat(props: {
-  label: string
-  value: string
-  sub: string
-  onReset?: () => void
-}): React.JSX.Element {
-  return (
-    <div className="text-right">
-      <div className="text-[10px] font-medium uppercase tracking-[0.08em] text-faint">
-        {props.label}
-      </div>
-      <div className="font-mono text-[15px] font-semibold tabular-nums text-foreground">
-        {props.value}
-      </div>
-      <div className="text-[10px] text-faint">
-        {props.sub}
-        {props.onReset && (
-          <button onClick={props.onReset} className="ml-1.5 text-faint transition hover:text-red-400">
-            reset
-          </button>
-        )}
-      </div>
-    </div>
-  )
-}
-
 /* =========================== Settings modal =========================== */
 
 function SettingsModal(props: {
@@ -549,8 +440,6 @@ function SettingsModal(props: {
   setApiKey: (v: string) => void
   keySaved: boolean
   saveKey: () => void
-  rates: { input: number; output: number }
-  persistRates: (r: { input: number; output: number }) => void
 }): React.JSX.Element {
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
@@ -602,32 +491,6 @@ function SettingsModal(props: {
               </button>
             </div>
           </Field>
-
-
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="Rate $/1M · input">
-              <input
-                type="number"
-                step="0.5"
-                value={props.rates.input}
-                onChange={(e) =>
-                  props.persistRates({ ...props.rates, input: Number(e.target.value) })
-                }
-                className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm tabular-nums outline-none transition focus:border-accent"
-              />
-            </Field>
-            <Field label="Rate $/1M · output">
-              <input
-                type="number"
-                step="0.5"
-                value={props.rates.output}
-                onChange={(e) =>
-                  props.persistRates({ ...props.rates, output: Number(e.target.value) })
-                }
-                className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm tabular-nums outline-none transition focus:border-accent"
-              />
-            </Field>
-          </div>
 
         </div>
 
@@ -879,17 +742,6 @@ function CoffeeIcon(): React.JSX.Element {
       <path d="M17 8h1a4 4 0 1 1 0 8h-1" />
       <path d="M3 8h14v9a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4Z" />
       <path d="M6 2v2M10 2v2M14 2v2" />
-    </svg>
-  )
-}
-
-function ChartIcon(): React.JSX.Element {
-  return (
-    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M3 3v18h18" />
-      <rect x="7" y="12" width="3" height="5" rx="0.5" />
-      <rect x="12" y="8" width="3" height="9" rx="0.5" />
-      <rect x="17" y="5" width="3" height="12" rx="0.5" />
     </svg>
   )
 }
