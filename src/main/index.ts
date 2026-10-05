@@ -1,6 +1,6 @@
 import { app, BrowserWindow, ipcMain, safeStorage, shell, session, systemPreferences } from 'electron'
 import { join, dirname } from 'node:path'
-import { existsSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync } from 'node:fs'
 import { spawn, execSync, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import Store from 'electron-store'
 
@@ -43,7 +43,40 @@ function setApiKey(key: string): boolean {
 
 let mainWindow: BrowserWindow | null = null
 
+// Diagnostic logging: kept intentionally verbose for troubleshooting microphone/TCC issues.
+// Never log API keys or raw audio payloads.
+const debugLogPath = join(app.getPath('userData'), 'live-trans-debug.log')
+function debugLog(event: string, data?: unknown): void {
+  const timestamp = new Date().toISOString()
+  let suffix = ''
+  if (data !== undefined) {
+    try {
+      suffix = ' ' + JSON.stringify(data)
+    } catch {
+      suffix = ' ' + String(data)
+    }
+  }
+  try {
+    mkdirSync(dirname(debugLogPath), { recursive: true })
+    appendFileSync(debugLogPath, `[${timestamp}] [main] ${event}${suffix}\n`, 'utf8')
+  } catch {
+    // Logging must never affect the application.
+  }
+}
+
+debugLog('process-start', {
+  pid: process.pid,
+  platform: process.platform,
+  arch: process.arch,
+  electron: process.versions.electron,
+  chrome: process.versions.chrome,
+  node: process.versions.node,
+  os: process.getSystemVersion(),
+  appVersion: app.getVersion()
+})
+
 function createWindow(): void {
+  debugLog('create-window')
   const win = new BrowserWindow({
     width: 1040,
     height: 720,
@@ -59,9 +92,17 @@ function createWindow(): void {
   })
 
   mainWindow = win
-  win.on('ready-to-show', () => win.show())
+  debugLog('window-created', { webContentsId: win.webContents.id })
+  win.on('ready-to-show', () => { debugLog('window-ready-to-show'); win.show() })
+  win.webContents.on('did-finish-load', () => debugLog('renderer-did-finish-load'))
+  win.webContents.on('did-fail-load', (_e, code, desc, url) => debugLog('renderer-did-fail-load', { code, desc, url }))
+
   win.on('closed', () => {
     if (mainWindow === win) mainWindow = null
+  })
+
+  win.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+    debugLog('renderer-console', { level, message, line, sourceId })
   })
 
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -190,6 +231,7 @@ function rms16(buf: Buffer): number {
 }
 
 function stopCapture(): void {
+  debugLog('capture-stop')
   captureActive = false
   pcmLeftover = Buffer.alloc(0)
 }
@@ -208,19 +250,22 @@ function disposeCaptureProcess(): void {
 }
 
 function startCaptureProcess(): { ok: boolean; error?: string } {
-  if (audioProc) return { ok: true }
+  if (audioProc) { debugLog('capture-process-already-running', { pid: audioProc.pid }); return { ok: true } }
 
   const spec = captureSpawnSpec()
+  debugLog('capture-spawn-spec', spec)
   if ('error' in spec) {
     return { ok: false, error: spec.error }
   }
   let proc: ChildProcessWithoutNullStreams
   try {
+    debugLog('capture-spawn', { file: spec.file, args: spec.args })
     proc = spawn(spec.file, spec.args)
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) }
   }
   audioProc = proc
+  debugLog('capture-process-started', { pid: proc.pid })
 
   proc.stdout.on('data', (chunk: Buffer) => {
     // Re-frame the byte stream into exact 100ms frames so each chunk is sample-aligned.
@@ -258,9 +303,11 @@ function startCaptureProcess(): { ok: boolean; error?: string } {
   })
 
   proc.on('error', (e) => {
+    debugLog('capture-process-error', { message: e.message })
     mainWindow?.webContents.send('capture:error', e.message)
   })
-  proc.on('exit', (code) => {
+  proc.on('exit', (code, signal) => {
+    debugLog('capture-process-exit', { code, signal })
     if (code && code !== 0 && audioProc === proc) {
       mainWindow?.webContents.send(
         'capture:error',
@@ -274,19 +321,31 @@ function startCaptureProcess(): { ok: boolean; error?: string } {
 }
 
 ipcMain.handle('capture:start', () => {
+  debugLog('capture-start-ipc')
   const res = startCaptureProcess()
   if (res.ok) captureActive = true
   return res
 })
 
 ipcMain.handle('capture:stop', () => {
+  debugLog('capture-stop-ipc')
   stopCapture()
   return true
 })
 
-app.on('before-quit', disposeCaptureProcess)
+app.on('before-quit', () => { debugLog('before-quit'); disposeCaptureProcess() })
 
 // ---- IPC ----
+ipcMain.handle('debug:getPath', () => debugLogPath)
+
+ipcMain.handle('debug:log', (_e, event: string, data?: unknown) => {
+  debugLog(
+    `renderer:${String(event)}`,
+    data
+  )
+  return true
+})
+
 ipcMain.handle('settings:get', () => ({
   hasApiKey: !!store.get('apiKeyEnc'),
   apiKey: getApiKey(),
@@ -300,34 +359,51 @@ ipcMain.handle('settings:get', () => ({
 ipcMain.handle('settings:setApiKey', (_e, key: string) => setApiKey(key))
 
 ipcMain.handle('perm:microphoneStatus', () => {
-  if (process.platform !== 'darwin') return 'granted'
-  return systemPreferences.getMediaAccessStatus('microphone')
+  if (process.platform !== 'darwin') {
+    debugLog('microphone-status', { status: 'granted', platform: process.platform })
+    return 'granted'
+  }
+  const status = systemPreferences.getMediaAccessStatus('microphone')
+  debugLog('microphone-status', { status })
+  return status
 })
 
 let microphonePermissionRequest: Promise<boolean> | null = null
 
 ipcMain.handle('perm:requestMicrophone', async () => {
+  debugLog('microphone-permission-request-ipc')
   if (process.platform !== 'darwin') return true
 
   const status = systemPreferences.getMediaAccessStatus('microphone')
+  debugLog('microphone-permission-request-status', { status })
   if (status === 'granted') return true
   if (status === 'denied' || status === 'restricted') return false
-  if (microphonePermissionRequest) return microphonePermissionRequest
+  if (microphonePermissionRequest) {
+    debugLog('microphone-permission-request-coalesced')
+    return microphonePermissionRequest
+  }
 
   microphonePermissionRequest = (async () => {
     try {
+      debugLog('askForMediaAccess-start')
       const granted = await systemPreferences.askForMediaAccess('microphone')
+      debugLog('askForMediaAccess-result', { granted, status: systemPreferences.getMediaAccessStatus('microphone') })
       if (!granted) return false
 
       // macOS can resolve requestAccessForMediaType before the TCC status
       // observable by Chromium has caught up. Do not let getUserMedia race
       // that transition and trigger a second native permission dialog.
       for (let i = 0; i < 20; i++) {
-        if (systemPreferences.getMediaAccessStatus('microphone') === 'granted') return true
+        const polledStatus = systemPreferences.getMediaAccessStatus('microphone')
+        debugLog('microphone-permission-poll', { i, status: polledStatus })
+        if (polledStatus === 'granted') return true
         await new Promise((resolve) => setTimeout(resolve, 50))
       }
-      return systemPreferences.getMediaAccessStatus('microphone') === 'granted'
-    } catch {
+      const finalStatus = systemPreferences.getMediaAccessStatus('microphone')
+      debugLog('microphone-permission-final', { status: finalStatus })
+      return finalStatus === 'granted'
+    } catch (err) {
+      debugLog('microphone-permission-error', { error: err instanceof Error ? err.message : String(err) })
       return false
     } finally {
       microphonePermissionRequest = null
@@ -345,30 +421,40 @@ ipcMain.handle('settings:setPrefs', (_e, prefs: Partial<Persisted>) => {
 })
 
 app.whenReady().then(() => {
+  debugLog('app-ready', {
+    platform: process.platform,
+    arch: process.arch,
+    os: process.getSystemVersion(),
+    microphoneStatus: process.platform === 'darwin' ? systemPreferences.getMediaAccessStatus('microphone') : 'n/a'
+  })
   // Native macOS TCC consent is requested once during application startup.
   // Translation sessions never request permissions again.
   const ses = session.defaultSession
-  ses.setPermissionCheckHandler((_webContents, permission, _requestingOrigin, details) => {
+  ses.setPermissionCheckHandler((_webContents, permission, requestingOrigin, details) => {
+    debugLog('permission-check', { permission, requestingOrigin, details })
     if (permission !== 'media') return false
     if (process.platform !== 'darwin') return true
     if (details?.mediaType && details.mediaType !== 'audio') return false
     return systemPreferences.getMediaAccessStatus('microphone') === 'granted'
   })
   ses.setPermissionRequestHandler((_webContents, permission, callback, details) => {
+    debugLog('permission-request', { permission, details, microphoneStatus: process.platform === 'darwin' ? systemPreferences.getMediaAccessStatus('microphone') : 'n/a' })
     if (permission !== 'media') return callback(false)
     if (process.platform !== 'darwin') return callback(true)
     const mediaTypes = details && 'mediaTypes' in details ? details.mediaTypes : []
     const wantsAudio = mediaTypes.length === 0 || mediaTypes.includes('audio')
-    callback(wantsAudio && systemPreferences.getMediaAccessStatus('microphone') === 'granted')
+    const allowed = wantsAudio && systemPreferences.getMediaAccessStatus('microphone') === 'granted'
+    debugLog('permission-request-callback', { wantsAudio, allowed })
+    callback(allowed)
   })
 
   createWindow()
+  debugLog('capture-startup-result', startCaptureProcess())
 
-  // Warm up system-audio capture once at application startup. Microphone consent
-  // is requested by the renderer through the single IPC path, so there cannot be
-  // two independent native microphone requests racing each other.
+  // Warm up system-audio capture once at application startup.
   if (process.platform === 'darwin') {
-    startCaptureProcess()
+    debugLog('capture-startup')
+    debugLog('capture-startup-result', startCaptureProcess())
   }
 
   app.on('activate', () => {
