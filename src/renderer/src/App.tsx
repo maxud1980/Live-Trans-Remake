@@ -46,6 +46,7 @@ export default function App(): React.JSX.Element {
   const systemCaptureRef = useRef<SystemAudioCapture | null>(null)
   const microphoneCaptureRef = useRef<MicrophoneAudioCapture | null>(null)
   const clientRef = useRef<LiveTranslateClient | null>(null)
+  const startingRef = useRef(false)
   const origRef = useRef<HTMLDivElement | null>(null)
   const transRef = useRef<HTMLDivElement | null>(null)
 
@@ -100,13 +101,16 @@ export default function App(): React.JSX.Element {
   }
 
   async function start(): Promise<void> {
+    if (startingRef.current || running) return
+    startingRef.current = true
     if (!apiKey.trim()) {
       setStatus('error')
       setMessage('Enter your Gemini API key first.')
       setShowSettings(true)
+      startingRef.current = false
       return
     }
-    setStatus('connecting')
+    setStatus('connecting'
     setMessage(audioSourceId === SYSTEM_AUDIO_ID ? 'Connecting — preparing system audio…' : 'Connecting — requesting microphone permission…')
     setOriginal('')
     setTranslated('')
@@ -119,6 +123,7 @@ export default function App(): React.JSX.Element {
       if (!microphoneAllowed) {
         setStatus('error')
         setMessage('Microphone permission was denied. Enable it in System Settings → Privacy & Security → Microphone.')
+        startingRef.current = false
         return
       }
       await refreshDevices()
@@ -150,7 +155,9 @@ export default function App(): React.JSX.Element {
             else await microphoneCapture?.start(audioSourceId, handlers)
             setStatus('listening')
             setMessage(audioSourceId === SYSTEM_AUDIO_ID ? 'Listening to system audio.' : 'Listening to microphone.')
+            startingRef.current = false
           } catch {
+            startingRef.current = false
             /* capture.start already reported the error */
           }
         },
@@ -174,6 +181,7 @@ export default function App(): React.JSX.Element {
           setMessage(m)
         },
         onClose: ({ code, reason }) => {
+          startingRef.current = false
           setStatus((s) => (s === 'error' ? s : 'idle'))
           setMessage(reason ? `Disconnected (${code}): ${reason}` : `Disconnected (${code}).`)
         }
@@ -209,7 +217,7 @@ export default function App(): React.JSX.Element {
   }
 
   async function onAudioSourceChange(id: string): Promise<void> {
-    if (running) return
+    if (running || startingRef.current) return
     if (id === '__request_microphone__') {
       if (isMac) {
         const allowed = await window.api.requestMicrophonePermission()
