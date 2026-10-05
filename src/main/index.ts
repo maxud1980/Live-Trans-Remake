@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, safeStorage, shell, systemPreferences } from 'electron'
+import { app, BrowserWindow, ipcMain, safeStorage, shell } from 'electron'
 import { join, dirname } from 'node:path'
 import { existsSync } from 'node:fs'
 import { spawn, execSync, type ChildProcessWithoutNullStreams } from 'node:child_process'
@@ -288,19 +288,6 @@ ipcMain.handle('settings:setPrefs', (_e, prefs: Partial<Persisted>) => {
   if (typeof prefs.targetLang === 'string') store.set('targetLang', prefs.targetLang)
   if (typeof prefs.audioSourceId === 'string') store.set('audioSourceId', prefs.audioSourceId)
   return true
-})
-
-
-// macOS: request microphone permission (covers audio capture entitlement prompt).
-ipcMain.handle('perm:ensureAudio', async () => {
-  if (process.platform !== 'darwin') return true
-  const status = systemPreferences.getMediaAccessStatus('microphone')
-  if (status === 'granted') return true
-  try {
-    return await systemPreferences.askForMediaAccess('microphone')
-  } catch {
-    return false
-  }
 })
 
 app.whenReady().then(() => {
