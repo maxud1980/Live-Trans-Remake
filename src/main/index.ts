@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, safeStorage, shell, systemPreferences } from 'electron'
+import { app, BrowserWindow, ipcMain, safeStorage, shell, session, systemPreferences } from 'electron'
 import { join, dirname } from 'node:path'
 import { existsSync } from 'node:fs'
 import { spawn, execSync, type ChildProcessWithoutNullStreams } from 'node:child_process'
@@ -306,6 +306,25 @@ ipcMain.handle('settings:setPrefs', (_e, prefs: Partial<Persisted>) => {
 })
 
 app.whenReady().then(() => {
+  // Native macOS TCC consent is requested explicitly before microphone capture.
+  // Once macOS has granted it, also grant Chromium's media permission for this
+  // local renderer so getUserMedia() does not start a second permission flow.
+  // System-audio mode never touches this path because it does not call getUserMedia().
+  const ses = session.defaultSession
+  ses.setPermissionCheckHandler((_webContents, permission, _requestingOrigin, details) => {
+    if (permission !== 'media') return false
+    if (process.platform !== 'darwin') return true
+    if (details?.mediaType && details.mediaType !== 'audio') return false
+    return systemPreferences.getMediaAccessStatus('microphone') === 'granted'
+  })
+  ses.setPermissionRequestHandler((_webContents, permission, callback, details) => {
+    if (permission !== 'media') return callback(false)
+    if (process.platform !== 'darwin') return callback(true)
+    const mediaTypes = details && 'mediaTypes' in details ? details.mediaTypes : []
+    const wantsAudio = mediaTypes.length === 0 || mediaTypes.includes('audio')
+    callback(wantsAudio && systemPreferences.getMediaAccessStatus('microphone') === 'granted')
+  })
+
   createWindow()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
