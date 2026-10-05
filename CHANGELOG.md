@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.4] — 2026-10-05
+
+### Fixed
+- Removed the manual macOS microphone permission request that could cause the permission dialog to repeat indefinitely.
+- Microphone access is now requested only by the actual microphone capture via getUserMedia().
+
 ## [0.1.3] — 2026-10-05
 
 ### Fixed
