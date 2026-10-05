@@ -56,28 +56,36 @@ export default function App(): React.JSX.Element {
 
   // ---- initial load ----
   useEffect(() => {
-    window.api.getSettings().then((s) => {
-      setApiKey(s.apiKey)
-      setKeySaved(s.hasApiKey)
-      setSourceLang(s.sourceLang)
-      setTargetLang(s.targetLang)
-      setAudioSourceId(s.audioSourceId || SYSTEM_AUDIO_ID)
-      setIsMac(s.platform === 'darwin')
-      if (s.hasApiKey) setShowSettings(false)
-    })
     let cancelled = false
+
     void (async () => {
       try {
+        const s = await window.api.getSettings()
+        if (cancelled) return
+
+        setApiKey(s.apiKey)
+        setKeySaved(s.hasApiKey)
+        setSourceLang(s.sourceLang)
+        setTargetLang(s.targetLang)
+        setAudioSourceId(s.audioSourceId || SYSTEM_AUDIO_ID)
+        setIsMac(s.platform === 'darwin')
+        if (s.hasApiKey) setShowSettings(false)
+
+        // On macOS, request microphone consent first. Only after the native
+        // permission call has completed do we enumerate devices, because
+        // getUserMedia/enumerateDevices can otherwise expose no device labels
+        // or an empty audio-input list before TCC has settled.
         if (s.platform === 'darwin') {
           const allowed = await window.api.requestMicrophonePermission()
           if (allowed && !cancelled) await refreshDevices()
-        } else {
+        } else if (!cancelled) {
           await refreshDevices()
         }
       } catch {
         // Permission/device enumeration errors are handled when capture starts.
       }
     })()
+
     return () => {
       cancelled = true
     }
