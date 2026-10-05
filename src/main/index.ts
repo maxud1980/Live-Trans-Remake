@@ -447,8 +447,10 @@ app.whenReady().then(() => {
     debugLog('permission-check', { permission, requestingOrigin, details })
     if (permission !== 'media') return false
     if (process.platform !== 'darwin') return true
-    if (details?.mediaType && details.mediaType !== 'audio') return false
-    return systemPreferences.getMediaAccessStatus('microphone') === 'granted'
+    // Let Chromium/macOS TCC own the actual microphone authorization decision.
+    // The previous status-gated check could race TCC and turn one getUserMedia()
+    // authorization into repeated native prompts.
+    return details?.mediaType === undefined || details.mediaType === 'audio'
   })
   ses.setPermissionRequestHandler((_webContents, permission, callback, details) => {
     debugLog('permission-request', { permission, details, microphoneStatus: process.platform === 'darwin' ? systemPreferences.getMediaAccessStatus('microphone') : 'n/a' })
@@ -456,9 +458,10 @@ app.whenReady().then(() => {
     if (process.platform !== 'darwin') return callback(true)
     const mediaTypes = details && 'mediaTypes' in details ? details.mediaTypes : []
     const wantsAudio = mediaTypes.length === 0 || mediaTypes.includes('audio')
-    const allowed = wantsAudio && systemPreferences.getMediaAccessStatus('microphone') === 'granted'
-    debugLog('permission-request-callback', { wantsAudio, allowed })
-    callback(allowed)
+    // Grant the Chromium media permission and let macOS TCC present at most one
+    // native microphone prompt. We do not call askForMediaAccess() separately.
+    debugLog('permission-request-callback', { wantsAudio, allowed: wantsAudio })
+    callback(wantsAudio)
   })
 
   createWindow()
