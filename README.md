@@ -26,7 +26,6 @@ The main changes in this remake:
 - **Automatic reconnect and session resumption** — sessions can recover from Live API connection rotation or temporary network problems.
 - **Reworked UI** — redesigned compact interface with side-by-side transcripts, settings, usage information and status controls.
 - **Live input-level meter** — shows the actual source audio level.
-- **Usage/cost tracking** — displays token usage and estimated session cost.
 - **Encrypted API-key storage** — uses Electron safeStorage.
 - **Automated builds** — GitHub Actions produces Windows and Apple Silicon macOS builds.
 
