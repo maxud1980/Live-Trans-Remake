@@ -64,7 +64,8 @@ export default function App(): React.JSX.Element {
       setIsMac(s.platform === 'darwin')
       if (s.hasApiKey) setShowSettings(false)
     })
-    void refreshDevices()
+    // Do not enumerate microphones on startup: system-audio mode does not need
+    // microphone access at all.
     navigator.mediaDevices.addEventListener('devicechange', refreshDevices)
     return () => navigator.mediaDevices.removeEventListener('devicechange', refreshDevices)
   }, [])
@@ -199,6 +200,7 @@ export default function App(): React.JSX.Element {
     if (running) return
     setAudioSourceId(id)
     window.api.setPrefs({ audioSourceId: id })
+    if (id !== SYSTEM_AUDIO_ID) void refreshDevices()
   }
 
   const dot =
