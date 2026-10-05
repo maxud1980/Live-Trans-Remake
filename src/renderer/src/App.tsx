@@ -64,9 +64,13 @@ export default function App(): React.JSX.Element {
       setIsMac(s.platform === 'darwin')
       if (s.hasApiKey) setShowSettings(false)
     })
-    void refreshDevices()
-    navigator.mediaDevices.addEventListener('devicechange', refreshDevices)
-    return () => navigator.mediaDevices.removeEventListener('devicechange', refreshDevices)
+    let cancelled = false
+    window.api.microphonePermissionStatus().then((status) => {
+      if (!cancelled && status === 'granted') void refreshDevices()
+    })
+    return () => {
+      cancelled = true
+    }
   }, [])
 
   // auto-scroll transcripts
@@ -107,9 +111,18 @@ export default function App(): React.JSX.Element {
     setOriginal('')
     setTranslated('')
 
-    // Microphone permission is requested by getUserMedia() only when microphone input
-    // is actually started. System audio capture must never request microphone access.
-    await refreshDevices()
+    // Do not enumerate microphone devices while using System Audio. On macOS,
+    // keep microphone TCC completely untouched until the user explicitly chooses
+    // microphone input.
+    if (audioSourceId !== SYSTEM_AUDIO_ID) {
+      const microphoneAllowed = await window.api.requestMicrophonePermission()
+      if (!microphoneAllowed) {
+        setStatus('error')
+        setMessage('Microphone permission was denied. Enable it in System Settings → Privacy & Security → Microphone.')
+        return
+      }
+      await refreshDevices()
+    }
 
     const client = new LiveTranslateClient()
     const systemCapture = audioSourceId === SYSTEM_AUDIO_ID ? new SystemAudioCapture() : null
@@ -195,10 +208,27 @@ export default function App(): React.JSX.Element {
     window.api.setPrefs({ targetLang: code })
   }
 
-  function onAudioSourceChange(id: string): void {
+  async function onAudioSourceChange(id: string): Promise<void> {
     if (running) return
+    if (id === '__request_microphone__') {
+      if (isMac) {
+        const allowed = await window.api.requestMicrophonePermission()
+        if (!allowed) {
+          setMessage('Microphone permission was denied. Enable it in System Settings → Privacy & Security → Microphone.')
+          return
+        }
+      }
+      await refreshDevices()
+      const devices = await navigator.mediaDevices.enumerateDevices()
+      const firstInput = devices.find((d) => d.kind === 'audioinput')
+      if (firstInput?.deviceId) {
+        setAudioSourceId(firstInput.deviceId)
+        await window.api.setPrefs({ audioSourceId: firstInput.deviceId })
+      }
+      return
+    }
     setAudioSourceId(id)
-    window.api.setPrefs({ audioSourceId: id })
+    void window.api.setPrefs({ audioSourceId: id })
   }
 
   const dot =
@@ -309,6 +339,9 @@ export default function App(): React.JSX.Element {
             <Select value={audioSourceId} onChange={onAudioSourceChange}>
               <option value={SYSTEM_AUDIO_ID}>System audio</option>
               {audioDevices.map((d) => <option key={d.deviceId} value={d.deviceId}>🎤 {d.label}</option>)}
+              {isMac && audioDevices.length === 0 && (
+                <option value="__request_microphone__">🎤 Enable microphone…</option>
+              )}
             </Select>
           </div>
           <Meter level={level} active={running} />
