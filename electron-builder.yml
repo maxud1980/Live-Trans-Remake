@@ -34,8 +34,8 @@ mac:
   # are set in the environment (see docs/BUILD.md).
   notarize: true
   extendInfo:
-    NSMicrophoneUsageDescription: live-trans captures your system audio to translate it in real time.
-    NSAudioCaptureUsageDescription: live-trans captures your system audio to translate it in real time.
+    NSMicrophoneUsageDescription: live-trans uses your selected microphone as the translation source.
+    NSAudioCaptureUsageDescription: live-trans captures system audio to translate it in real time.
 
 dmg:
   title: live-trans ${version}
