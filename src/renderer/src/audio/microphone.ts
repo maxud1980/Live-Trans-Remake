@@ -34,8 +34,28 @@ export class MicrophoneAudioCapture {
   private pending = new Float32Array(0)
 
   async start(deviceId: string, handlers: MicrophoneHandlers): Promise<void> {
+    await window.api.debugLog('microphone.start.begin', {
+      deviceId,
+      readyState: document.readyState,
+      userAgent: navigator.userAgent,
+      platform: navigator.platform
+    })
     await this.stop()
     try {
+      await window.api.debugLog('microphone.getUserMedia.before', {
+        deviceId,
+        constraints: {
+          audio: {
+            deviceId: deviceId && deviceId !== 'default' ? { exact: deviceId } : undefined,
+            channelCount: 1,
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false
+          },
+          video: false
+        }
+      })
+      const startedAt = Date.now()
       this.stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           deviceId: deviceId && deviceId !== 'default' ? { exact: deviceId } : undefined,
@@ -45,6 +65,23 @@ export class MicrophoneAudioCapture {
           autoGainControl: false
         },
         video: false
+      })
+      await window.api.debugLog('microphone.getUserMedia.after', {
+        elapsedMs: Date.now() - startedAt,
+        streamId: this.stream.id,
+        tracks: this.stream.getAudioTracks().map((track) => ({
+          id: track.id,
+          label: track.label,
+          readyState: track.readyState,
+          enabled: track.enabled,
+          muted: track.muted,
+          settings: track.getSettings()
+        }))
+      })
+      this.stream.getAudioTracks().forEach((track) => {
+        track.onended = () => void window.api.debugLog('microphone.track.ended', { trackId: track.id, label: track.label })
+        track.onmute = () => void window.api.debugLog('microphone.track.mute', { trackId: track.id, label: track.label })
+        track.onunmute = () => void window.api.debugLog('microphone.track.unmute', { trackId: track.id, label: track.label })
       })
       this.ctx = new AudioContext({ sampleRate: 16000 })
       this.source = this.ctx.createMediaStreamSource(this.stream)
@@ -70,7 +107,9 @@ export class MicrophoneAudioCapture {
       this.processor.connect(this.silentGain)
       this.silentGain.connect(this.ctx.destination)
       await this.ctx.resume()
+      await window.api.debugLog('microphone.start.success', { audioContextState: this.ctx.state, sampleRate: this.ctx.sampleRate })
     } catch (err) {
+      await window.api.debugLog('microphone.start.error', { error: err instanceof Error ? { name: err.name, message: err.message, stack: err.stack } : String(err) })
       await this.stop()
       const message = err instanceof DOMException && err.name === 'NotAllowedError'
         ? 'Microphone permission was denied.'
@@ -81,6 +120,13 @@ export class MicrophoneAudioCapture {
   }
 
   async stop(): Promise<void> {
+    const hadResources = !!(this.stream || this.ctx || this.processor)
+    if (hadResources) {
+      await window.api.debugLog('microphone.stop.begin', {
+        streamId: this.stream?.id ?? null,
+        trackIds: this.stream?.getTracks().map((t) => t.id) ?? []
+      })
+    }
     this.processor?.disconnect()
     this.silentGain?.disconnect()
     this.source?.disconnect()
@@ -92,5 +138,6 @@ export class MicrophoneAudioCapture {
     this.stream = null
     this.ctx = null
     this.pending = new Float32Array(0)
+    if (hadResources) await window.api.debugLog('microphone.stop.done')
   }
 }
