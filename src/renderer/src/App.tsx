@@ -483,7 +483,10 @@ const Column = memo(function Column(props: {
 
 const METER_BARS = 20
 function Meter({ level, active }: { level: number; active: boolean }): React.JSX.Element {
-  const pct = active ? Math.min(100, level * 320) : 0
+  // RMS is a linear amplitude value (0..1). A linear UI scale makes normal
+  // speech/music levels look almost dead, so map -60..0 dBFS to the meter.
+  const db = level > 0 ? 20 * Math.log10(level) : -Infinity
+  const pct = active ? Math.max(0, Math.min(100, ((db + 60) / 60) * 100)) : 0
   const lit = Math.round((pct / 100) * METER_BARS)
   return (
     <div className="flex h-10 items-center gap-2.5 rounded-lg border border-border bg-background/40 px-3">
