@@ -86,16 +86,11 @@ export default function App(): React.JSX.Element {
         setIsMac(s.platform === 'darwin')
         if (s.hasApiKey) setShowSettings(false)
 
-        // On macOS, request microphone consent first. Only after the native
-        // permission call has completed do we enumerate devices, because
-        // getUserMedia/enumerateDevices can otherwise expose no device labels
-        // or an empty audio-input list before TCC has settled.
-        if (s.platform === 'darwin') {
-          void window.api.debugLog('app.initial-load.request-microphone-permission')
-          const allowed = await window.api.requestMicrophonePermission()
-          void window.api.debugLog('app.initial-load.request-microphone-permission.result', { allowed })
-          if (allowed && !cancelled) await refreshDevices()
-        } else if (!cancelled) {
+        // Let Chromium's getUserMedia be the only microphone authorization path.
+        // Do not call Electron's systemPreferences.askForMediaAccess() separately:
+        // on macOS this can create a second TCC authorization path before Chromium
+        // opens the selected device.
+        if (!cancelled) {
           await refreshDevices()
         }
       } catch (err) {
@@ -121,6 +116,14 @@ export default function App(): React.JSX.Element {
 
   async function refreshDevices(): Promise<void> {
     try {
+      // A single Chromium getUserMedia() call unlocks device labels on macOS and
+      // is also the only native microphone authorization path in this build.
+      if (isMac) {
+        void window.api.debugLog('devices.prime-microphone.begin')
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+        stream.getTracks().forEach((track) => track.stop())
+        void window.api.debugLog('devices.prime-microphone.success')
+      }
       void window.api.debugLog('devices.enumerate.begin')
       const devices = await navigator.mediaDevices.enumerateDevices()
       void window.api.debugLog('devices.enumerate.result', devices.map((d) => ({
