@@ -1,3 +1,10 @@
+## [0.1.9] — 2026-10-05
+
+### Fixed
+- Serialized macOS microphone permission requests so multiple renderer actions cannot trigger concurrent TCC prompts.
+- Waited for macOS TCC to report the microphone as granted before starting Chromium microphone capture, preventing a native permission race.
+- Prevented multiple simultaneous translation starts from creating multiple microphone permission requests.
+
 ## [0.1.8] — 2026-10-05
 
 ### Fixed
