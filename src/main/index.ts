@@ -6,7 +6,6 @@ import Store from 'electron-store'
 
 type Persisted = {
   apiKeyEnc?: string // base64 of safeStorage-encrypted API key
-  totalCostUsd: number
   sourceLang: string
   targetLang: string
   audioSourceId: string
@@ -14,7 +13,6 @@ type Persisted = {
 
 const store = new Store<Persisted>({
   defaults: {
-    totalCostUsd: 0,
     sourceLang: 'auto',
     targetLang: 'en',
     audioSourceId: '__system_audio__'
@@ -276,7 +274,6 @@ app.on('before-quit', stopCapture)
 ipcMain.handle('settings:get', () => ({
   hasApiKey: !!store.get('apiKeyEnc'),
   apiKey: getApiKey(),
-  totalCostUsd: store.get('totalCostUsd'),
   sourceLang: store.get('sourceLang'),
   targetLang: store.get('targetLang'),
   audioSourceId: store.get('audioSourceId'),
@@ -293,16 +290,6 @@ ipcMain.handle('settings:setPrefs', (_e, prefs: Partial<Persisted>) => {
   return true
 })
 
-ipcMain.handle('cost:addTotal', (_e, deltaUsd: number) => {
-  const next = (store.get('totalCostUsd') || 0) + (Number(deltaUsd) || 0)
-  store.set('totalCostUsd', next)
-  return next
-})
-
-ipcMain.handle('cost:resetTotal', () => {
-  store.set('totalCostUsd', 0)
-  return 0
-})
 
 // macOS: request microphone permission (covers audio capture entitlement prompt).
 ipcMain.handle('perm:ensureAudio', async () => {
