@@ -1,0 +1,60 @@
+name: Build Live Trans
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-windows:
+    name: Windows
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.20
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build Windows package
+        run: bun run dist:win
+
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-trans-windows
+          path: |
+            dist/*.exe
+            dist/*.msi
+          if-no-files-found: error
+
+  build-macos:
+    name: macOS Apple Silicon
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.20
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build macOS package
+        run: bun run dist:mac
+
+      - name: Upload macOS build
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-trans-macos-arm64
+          path: dist/*.dmg
+          if-no-files-found: error
