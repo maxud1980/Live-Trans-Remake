@@ -1,3 +1,11 @@
+## [0.1.7] — 2026-10-05
+
+### Fixed
+- macOS no longer enumerates microphone devices while the app is using System Audio, avoiding unnecessary microphone permission prompts.
+- Microphone permission is now requested explicitly through macOS TCC only when microphone input is selected.
+- Removed the custom Chromium media permission handlers; macOS handles microphone consent through the native Electron API.
+- Restored microphone device enumeration after permission is explicitly granted.
+
 # Changelog
 
 ## [0.1.6] — 2026-10-05
