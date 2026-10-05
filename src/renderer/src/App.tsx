@@ -91,7 +91,7 @@ export default function App(): React.JSX.Element {
         // on macOS this can create a second TCC authorization path before Chromium
         // opens the selected device.
         if (!cancelled) {
-          await refreshDevices()
+          await refreshDevices(s.platform === 'darwin')
         }
       } catch (err) {
         void window.api.debugLog('app.initial-load.error', { error: err instanceof Error ? { name: err.name, message: err.message, stack: err.stack } : String(err) })
@@ -114,11 +114,11 @@ export default function App(): React.JSX.Element {
     transRef.current?.scrollTo({ top: transRef.current.scrollHeight })
   }, [translated])
 
-  async function refreshDevices(): Promise<void> {
+  async function refreshDevices(primeMicrophone = isMac): Promise<void> {
     try {
       // A single Chromium getUserMedia() call unlocks device labels on macOS and
       // is also the only native microphone authorization path in this build.
-      if (isMac) {
+      if (primeMicrophone) {
         void window.api.debugLog('devices.prime-microphone.begin')
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
         stream.getTracks().forEach((track) => track.stop())
