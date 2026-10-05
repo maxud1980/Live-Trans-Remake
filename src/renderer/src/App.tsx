@@ -66,9 +66,18 @@ export default function App(): React.JSX.Element {
       if (s.hasApiKey) setShowSettings(false)
     })
     let cancelled = false
-    window.api.microphonePermissionStatus().then((status) => {
-      if (!cancelled && status === 'granted') void refreshDevices()
-    })
+    void (async () => {
+      try {
+        if (s.platform === 'darwin') {
+          const allowed = await window.api.requestMicrophonePermission()
+          if (allowed && !cancelled) await refreshDevices()
+        } else {
+          await refreshDevices()
+        }
+      } catch {
+        // Permission/device enumeration errors are handled when capture starts.
+      }
+    })()
     return () => {
       cancelled = true
     }
