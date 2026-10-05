@@ -13,6 +13,7 @@ permissions:
 
 jobs:
   build-windows:
+    if: startsWith(github.ref, 'refs/tags/v')
     name: Windows
     runs-on: windows-latest
     steps:
