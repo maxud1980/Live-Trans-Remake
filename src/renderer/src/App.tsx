@@ -56,11 +56,15 @@ export default function App(): React.JSX.Element {
 
   // ---- initial load ----
   useEffect(() => {
+    void window.api.debugLog('app.mount', { href: window.location.href, userAgent: navigator.userAgent, platform: navigator.platform, language: navigator.language })
+    void window.api.getDebugLogPath().then((path) => window.api.debugLog('debug-log-path', { path }))
     let cancelled = false
 
     void (async () => {
       try {
+        void window.api.debugLog('app.initial-load.begin')
         const s = await window.api.getSettings()
+        void window.api.debugLog('app.initial-load.settings', { ...s, apiKey: s.apiKey ? '<present>' : '' })
         if (cancelled) return
 
         setApiKey(s.apiKey)
@@ -76,12 +80,15 @@ export default function App(): React.JSX.Element {
         // getUserMedia/enumerateDevices can otherwise expose no device labels
         // or an empty audio-input list before TCC has settled.
         if (s.platform === 'darwin') {
+          void window.api.debugLog('app.initial-load.request-microphone-permission')
           const allowed = await window.api.requestMicrophonePermission()
+          void window.api.debugLog('app.initial-load.request-microphone-permission.result', { allowed })
           if (allowed && !cancelled) await refreshDevices()
         } else if (!cancelled) {
           await refreshDevices()
         }
-      } catch {
+      } catch (err) {
+        void window.api.debugLog('app.initial-load.error', { error: err instanceof Error ? { name: err.name, message: err.message, stack: err.stack } : String(err) })
         // Permission/device enumeration errors are handled when capture starts.
       }
     })()
@@ -101,12 +108,21 @@ export default function App(): React.JSX.Element {
 
   async function refreshDevices(): Promise<void> {
     try {
+      void window.api.debugLog('devices.enumerate.begin')
       const devices = await navigator.mediaDevices.enumerateDevices()
+      void window.api.debugLog('devices.enumerate.result', devices.map((d) => ({
+        kind: d.kind,
+        deviceId: d.deviceId,
+        groupId: d.groupId,
+        label: d.label
+      })))
       const inputs = devices
         .filter((d) => d.kind === 'audioinput')
         .map((d, index) => ({ deviceId: d.deviceId, label: d.label || "Microphone " + (index + 1) }))
+      void window.api.debugLog('devices.audio-inputs', inputs)
       setAudioDevices(inputs)
-    } catch {
+    } catch (err) {
+      void window.api.debugLog('devices.enumerate.error', { error: err instanceof Error ? { name: err.name, message: err.message, stack: err.stack } : String(err) })
       /* ignore */
     }
   }
@@ -118,7 +134,11 @@ export default function App(): React.JSX.Element {
   }
 
   async function start(): Promise<void> {
-    if (startingRef.current || running) return
+    void window.api.debugLog('app.start.called', { starting: startingRef.current, running, audioSourceId, apiKeyPresent: !!apiKey.trim() })
+    if (startingRef.current || running) {
+      void window.api.debugLog('app.start.ignored', { reason: startingRef.current ? 'already-starting' : 'already-running' })
+      return
+    }
     startingRef.current = true
     if (!apiKey.trim()) {
       setStatus('error')
@@ -131,12 +151,15 @@ export default function App(): React.JSX.Element {
     setMessage(audioSourceId === SYSTEM_AUDIO_ID ? 'Connecting — preparing system audio…' : 'Connecting — preparing microphone…')
     setOriginal('')
     setTranslated('')
+    void window.api.debugLog('app.start.session-begin', { audioSourceId, sourceLang, targetLang })
 
     // Permissions are requested once when the app starts. A translation session
     // only checks the already-granted microphone state and never asks macOS again.
     if (audioSourceId !== SYSTEM_AUDIO_ID) {
       const microphoneStatus = await window.api.microphonePermissionStatus()
+      void window.api.debugLog('app.start.microphone-status', { microphoneStatus })
       if (microphoneStatus !== 'granted') {
+        void window.api.debugLog('app.start.microphone-not-granted', { microphoneStatus })
         setStatus('error')
         setMessage('Microphone permission is not enabled. Enable it in System Settings → Privacy & Security → Microphone, then restart live-trans.')
         startingRef.current = false
@@ -145,6 +168,7 @@ export default function App(): React.JSX.Element {
       await refreshDevices()
     }
 
+    void window.api.debugLog('app.start.create-capture', { audioSourceId, isSystemAudio: audioSourceId === SYSTEM_AUDIO_ID })
     const client = new LiveTranslateClient()
     const systemCapture = audioSourceId === SYSTEM_AUDIO_ID ? new SystemAudioCapture() : null
     const microphoneCapture = audioSourceId === SYSTEM_AUDIO_ID ? null : new MicrophoneAudioCapture()
@@ -156,47 +180,62 @@ export default function App(): React.JSX.Element {
       onChunk: (b64: string) => client.sendAudioChunk(b64),
       onLevel: (rms: number) => setLevel(rms),
       onError: (m: string) => {
+        void window.api.debugLog('capture.handler.error', { message: m })
         setStatus('error')
         setMessage(`Capture error: ${m}`)
       }
     }
 
+    void window.api.debugLog('gemini.connect.call')
     client.connect(
       { apiKey: apiKey.trim(), sourceLanguageCode: sourceLang, targetLanguageCode: targetLang },
       {
         onReady: async () => {
+          void window.api.debugLog('gemini.onReady', { audioSourceId })
           setMessage(audioSourceId === SYSTEM_AUDIO_ID ? 'Connected — capturing system audio…' : 'Connected — capturing microphone…')
           try {
-            if (systemCapture) await systemCapture.start(handlers)
-            else await microphoneCapture?.start(audioSourceId, handlers)
+            if (systemCapture) {
+              void window.api.debugLog('system-capture.start')
+              await systemCapture.start(handlers)
+              void window.api.debugLog('system-capture.start.success')
+            } else {
+              void window.api.debugLog('microphone-capture.start.call', { audioSourceId })
+              await microphoneCapture?.start(audioSourceId, handlers)
+              void window.api.debugLog('microphone-capture.start.returned')
+            }
             setStatus('listening')
             setMessage(audioSourceId === SYSTEM_AUDIO_ID ? 'Listening to system audio.' : 'Listening to microphone.')
             startingRef.current = false
-          } catch {
+          } catch (err) {
+            void window.api.debugLog('capture.start.error', { error: err instanceof Error ? { name: err.name, message: err.message, stack: err.stack } : String(err) })
             startingRef.current = false
             /* capture.start already reported the error */
           }
         },
-        onReconnecting: (attempt) => {
+        onReconnecting: (attempt, delayMs) => {
+          void window.api.debugLog('gemini.onReconnecting', { attempt, delayMs })
           setStatus((s) => (s === 'error' ? s : 'connecting'))
           setMessage(attempt === 0 ? 'Session rotating — reconnecting…' : `Connection dropped — reconnecting (attempt ${attempt})…`)
         },
         onReconnected: () => {
+          void window.api.debugLog('gemini.onReconnected')
           setStatus((s) => (s === 'error' ? s : 'listening'))
           setMessage('Reconnected — resuming translation.')
         },
-        onInputTranscript: (t) => setOriginal((p) => appendCapped(p, t)),
-        onOutputTranscript: (t) => setTranslated((p) => appendCapped(p, t)),
+        onInputTranscript: (t) => { void window.api.debugLog('gemini.input-transcript', { length: t.length }); setOriginal((p) => appendCapped(p, t)) },
+        onOutputTranscript: (t) => { void window.api.debugLog('gemini.output-transcript', { length: t.length }); setTranslated((p) => appendCapped(p, t)) },
         onTurnComplete: () => {
           setOriginal((p) => (p.endsWith('\n') ? p : p + '\n'))
           setTranslated((p) => (p.endsWith('\n') ? p : p + '\n'))
         },
         onInterrupted: () => {},
         onError: (m) => {
+          void window.api.debugLog('gemini.handler.error', { message: m })
           setStatus('error')
           setMessage(m)
         },
         onClose: ({ code, reason }) => {
+          void window.api.debugLog('gemini.onClose', { code, reason })
           startingRef.current = false
           setStatus((s) => (s === 'error' ? s : 'idle'))
           setMessage(reason ? `Disconnected (${code}): ${reason}` : `Disconnected (${code}).`)
@@ -206,6 +245,7 @@ export default function App(): React.JSX.Element {
   }
 
   async function stop(): Promise<void> {
+    void window.api.debugLog('app.stop.called', { audioSourceId, status })
     await systemCaptureRef.current?.stop()
     await microphoneCaptureRef.current?.stop()
     clientRef.current?.close()
@@ -233,6 +273,7 @@ export default function App(): React.JSX.Element {
   }
 
   async function onAudioSourceChange(id: string): Promise<void> {
+    void window.api.debugLog('audio-source.change', { from: audioSourceId, to: id, running, starting: startingRef.current })
     if (running || startingRef.current) return
     setAudioSourceId(id)
     void window.api.setPrefs({ audioSourceId: id })
