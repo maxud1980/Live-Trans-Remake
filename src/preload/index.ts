@@ -3,7 +3,6 @@ import { contextBridge, ipcRenderer } from 'electron'
 export type AppSettings = {
   hasApiKey: boolean
   apiKey: string
-  totalCostUsd: number
   sourceLang: string
   targetLang: string
   audioSourceId: string
@@ -19,9 +18,6 @@ const api = {
     targetLang?: string
     audioSourceId?: string
   }): Promise<boolean> => ipcRenderer.invoke('settings:setPrefs', prefs),
-  addTotalCost: (deltaUsd: number): Promise<number> =>
-    ipcRenderer.invoke('cost:addTotal', deltaUsd),
-  resetTotalCost: (): Promise<number> => ipcRenderer.invoke('cost:resetTotal'),
   ensureAudioPermission: (): Promise<boolean> => ipcRenderer.invoke('perm:ensureAudio'),
 
   // System-audio capture via AudioTee (Core Audio tap, excludes our own process tree).
