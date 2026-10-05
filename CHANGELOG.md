@@ -6,6 +6,8 @@
 - Removed the usage/cost statistics button and the session/total spending indicators from the interface.
 - Removed token/cost tracking, cost-rate settings, persistent spending data, and the associated IPC/API code.
 - Kept the live source audio level meter as the audio feedback indicator.
+- Removed the Coffee support button from the header.
+- Made the source transcript header reflect the selected source language (or Auto-detect).
 
 All notable user-facing changes to this project are documented here.
 
