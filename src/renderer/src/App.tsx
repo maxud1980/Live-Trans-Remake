@@ -92,7 +92,7 @@ export default function App(): React.JSX.Element {
         // enumerate on subsequent device-change events. Calling getUserMedia from
         // refreshDevices() itself would re-trigger TCC when macOS reports a devicechange.
         if (!cancelled) {
-          if (s.platform === 'darwin') await ensureMicrophoneAccess()
+          if (s.platform === 'darwin') await ensureMicrophoneAccess(true)
           await refreshDevices()
         }
       } catch (err) {
@@ -116,8 +116,8 @@ export default function App(): React.JSX.Element {
     transRef.current?.scrollTo({ top: transRef.current.scrollHeight })
   }, [translated])
 
-  async function ensureMicrophoneAccess(): Promise<boolean> {
-    if (!isMac) return true
+  async function ensureMicrophoneAccess(shouldPrime = isMac): Promise<boolean> {
+    if (!shouldPrime) return true
     if (microphonePrimeRef.current) return microphonePrimeRef.current
 
     const promise = (async () => {
