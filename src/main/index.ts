@@ -465,11 +465,10 @@ app.whenReady().then(() => {
 
   createWindow()
 
-  // Warm up system-audio capture once at application startup.
-  if (process.platform === 'darwin') {
-    debugLog('capture-startup')
-    debugLog('capture-startup-result', startCaptureProcess())
-  }
+  // Do not start the native system-audio helper at application startup.
+  // It owns a separate Core Audio/TCC path and can interfere with microphone
+  // authorization on macOS. Start it lazily when system-audio capture is requested.
+  debugLog('capture-startup-skipped', { reason: 'lazy-start' })
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
