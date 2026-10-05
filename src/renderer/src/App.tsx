@@ -57,6 +57,17 @@ export default function App(): React.JSX.Element {
   // ---- initial load ----
   useEffect(() => {
     void window.api.debugLog('app.mount', { href: window.location.href, userAgent: navigator.userAgent, platform: navigator.platform, language: navigator.language })
+    const onDeviceChange = () => {
+      void window.api.debugLog('mediaDevices.devicechange')
+      void refreshDevices()
+    }
+    navigator.mediaDevices?.addEventListener('devicechange', onDeviceChange)
+    void navigator.permissions?.query({ name: 'microphone' as PermissionName }).then((permission) => {
+      void window.api.debugLog('permissions.microphone.initial', { state: permission.state })
+      permission.onchange = () => void window.api.debugLog('permissions.microphone.change', { state: permission.state })
+    }).catch((err) => {
+      void window.api.debugLog('permissions.microphone.query-error', { error: String(err) })
+    })
     void window.api.getDebugLogPath().then((path) => window.api.debugLog('debug-log-path', { path }))
     let cancelled = false
 
@@ -95,6 +106,8 @@ export default function App(): React.JSX.Element {
 
     return () => {
       cancelled = true
+      navigator.mediaDevices?.removeEventListener('devicechange', onDeviceChange)
+      void window.api.debugLog('app.unmount')
     }
   }, [])
 
