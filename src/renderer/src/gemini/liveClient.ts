@@ -54,6 +54,7 @@ export class LiveTranslateClient {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
 
   connect(config: LiveConfig, handlers: LiveHandlers): void {
+    void window.api.debugLog('gemini.connect.begin', { sourceLanguageCode: config.sourceLanguageCode, targetLanguageCode: config.targetLanguageCode, apiKeyPresent: !!config.apiKey })
     this.config = config
     this.handlers = handlers
     // Always start a fresh session; resumption is only used internally for
@@ -72,10 +73,12 @@ export class LiveTranslateClient {
 
     this.serverGoingAway = false
     const url = `${WS_BASE}?key=${encodeURIComponent(config.apiKey)}`
+    void window.api.debugLog('gemini.websocket.create', { hasResumptionHandle: !!this.resumptionHandle })
     const ws = new WebSocket(url)
     this.ws = ws
 
     ws.onopen = () => {
+      void window.api.debugLog('gemini.websocket.open')
       const setup: Record<string, any> = {
         setup: {
           model: LIVE_TRANSLATE_MODEL,
@@ -94,6 +97,7 @@ export class LiveTranslateClient {
           sessionResumption: this.resumptionHandle ? { handle: this.resumptionHandle } : {}
         }
       }
+      void window.api.debugLog('gemini.websocket.setup-send', { hasResumptionHandle: !!this.resumptionHandle })
       ws.send(JSON.stringify(setup))
     }
 
@@ -101,19 +105,23 @@ export class LiveTranslateClient {
       try {
         const raw = typeof ev.data === 'string' ? ev.data : await (ev.data as Blob).text()
         const msg = JSON.parse(raw) as Record<string, any>
+        void window.api.debugLog('gemini.websocket.message', { keys: Object.keys(msg), hasSetupComplete: !!msg.setupComplete, hasServerContent: !!msg.serverContent, hasError: !!msg.error, hasGoAway: !!msg.goAway, hasResumptionUpdate: !!msg.sessionResumptionUpdate })
         this.handleMessage(msg, handlers)
       } catch (err) {
+        void window.api.debugLog('gemini.websocket.message-parse-error', { error: String(err) })
         handlers.onError(`Failed to parse server message: ${String(err)}`)
       }
     }
 
     ws.onerror = () => {
+      void window.api.debugLog('gemini.websocket.error', { hasReadyOnce: this.hasReadyOnce })
       // Don't surface as a hard error during reconnect attempts — onclose drives recovery.
       if (this.hasReadyOnce) return
       handlers.onError('WebSocket error — check your API key, network, and model access.')
     }
 
     ws.onclose = (ev: CloseEvent) => {
+      void window.api.debugLog('gemini.websocket.close', { code: ev.code, reason: ev.reason, wasClean: ev.wasClean, closedByUser: this.closedByUser })
       this.ready = false
       if (this.ws === ws) this.ws = null
 
@@ -217,6 +225,7 @@ export class LiveTranslateClient {
   }
 
   close(): void {
+    void window.api.debugLog('gemini.close.called')
     this.ready = false
     this.closedByUser = true
     if (this.reconnectTimer) {
