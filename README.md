@@ -1,119 +1,130 @@
-# Live Trans
+# Live Trans — Remake
 
-[![Latest release](https://img.shields.io/github/v/release/minhnhat165/live-trans?label=download)](https://github.com/minhnhat165/live-trans/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/minhnhat165/live-trans/total)](https://github.com/minhnhat165/live-trans/releases)
 [![License: PolyForm NC 1.0.0](https://img.shields.io/badge/license-PolyForm--NC--1.0.0-blue)](LICENSE)
 
-A desktop app that translates **any system audio in real time** using Google's
-**Gemini 3.5 Live Translate**. Play a foreign-language YouTube video or course, flip the
-switch, and hear the translation (and read live subtitles) in your chosen language.
+A desktop real-time translation app for **system audio and microphone input**, powered by Google's Gemini Live API.
 
-> Built to scratch a real itch: watching Hindi / Chinese programming courses without
-> understanding a word.
+> **This repository is a community remake/fork of the original [Live Trans](https://github.com/minhnhat165/live-trans) by [Minh Nhật Nguyễn](https://github.com/minhnhat165).**
+>
+> The original project is the foundation for this version. This repository contains substantial changes to the UI, audio pipeline, platform support, reconnection behavior, and subtitles-only workflow.
 
-![live-trans translating Google's Gemini 3.5 Live Translate video from English to Vietnamese in real time](docs/demo.png)
+## Original project & attribution
 
-<sub>Translating Google's "Introducing Gemini 3.5 Live Translate" video into Vietnamese, live — original + translation side by side, with a running cost meter.</sub>
+The original project was created by **Minh Nhật Nguyễn**:
 
-## Download
+- **Original repository:** https://github.com/minhnhat165/live-trans
+- **Original author:** https://github.com/minhnhat165
+- **Original project page:** https://launch.j2team.dev/products/live-trans
 
-Grab the latest installer from the
-[**Releases page**](https://github.com/minhnhat165/live-trans/releases/latest):
+Please refer to the original repository for the upstream project and its history.
 
-- **macOS** — signed & notarized universal `.dmg` (Apple Silicon + Intel), macOS 14.2+.
-  Drag it into Applications and open.
-- **Windows** — `.exe` installer (Windows 10 build 20348+ / Windows 11). Unsigned for now,
-  so SmartScreen warns on first run — click **More info → Run anyway**.
+## What this version changes
 
-You'll still need your own [Gemini API key](#requirements). Prefer to build from source?
-See [`docs/BUILD.md`](docs/BUILD.md).
+This remake keeps the core idea of Live Trans — real-time speech translation using Gemini — but changes several important parts of the application:
 
-## Using the app
+- 📝 **Subtitles-first workflow** — translated audio playback was removed; the app focuses on source and translated text.
+- 🎙️ **Microphone input** — in addition to system audio, you can select an available microphone/input device.
+- 🪟 **Windows support** — native WASAPI process-loopback capture with a dedicated Windows helper.
+- 🍎 **macOS system-audio capture** — Core Audio process-tap capture with the app's own audio excluded.
+- 🔄 **Automatic reconnect / session resumption** — long-running sessions can recover from Live API connection rotation or network drops.
+- 📊 **Live source-level meter** — the input signal is displayed in the control bar using an audio-level scale.
+- 💰 **Usage and cost tracking** — session token usage and estimated spend are displayed in the UI.
+- 🔐 **Encrypted API-key storage** — the Gemini API key is stored through Electron's `safeStorage`.
+- 🎨 **Reworked interface** — compact two-column transcript layout, settings and usage panels, status indicators and a simplified control dock.
+- 🛠️ **CI builds** — automated Windows and Apple Silicon macOS builds are produced with GitHub Actions.
 
-1. **Get a Gemini API key** at [Google AI Studio](https://aistudio.google.com/apikey) with
-   access to the `gemini-3.5-live-translate-preview` model.
-2. Open live-trans → click the **⚙️ Settings** gear → paste your API key (stored encrypted in
-   the OS keychain).
-3. On the main screen choose the **source language**, **target language**, and **audio input**:
-   **System audio** or any available microphone/input device.
-4. Hit **▶ Enable translation** and grant the macOS audio-recording permission when prompted.
-5. Play a foreign-language video/call or speak into the selected microphone. The **Original**
-   column shows the source speech; the **Translation** column shows the translated text live.
-6. **📊 Usage** shows token counts and live cost; **■ Stop** ends the session. Long sessions
-   can reconnect automatically when the Live API rotates the connection.
+## Screenshot
+
+![Live Trans interface](docs/demo.png)
+
+*The screenshot above is the project's current UI preview. If the interface changes substantially, this image should be replaced with a fresh screenshot.*
+
+## Features
+
+- Real-time translation of system audio
+- Microphone/input-device translation
+- Original and translated transcripts side by side
+- Automatic source-language detection
+- Configurable target language
+- macOS and Windows builds
+- Automatic Live API reconnect/session resumption
+- Live input-level meter
+- Session token/cost tracking
+- Encrypted local API-key storage
+- No translated-audio playback in this remake
 
 ## How it works
 
 ```
 [System audio] ─┐
-                ├─► 16kHz PCM ─► IPC ─► WebSocket ─► gemini-3.5-live-translate-preview
+                ├─► 16 kHz PCM ─► IPC ─► WebSocket ─► Gemini Live API
 [Microphone] ───┘                                      │
-                                                       └─► source + translated subtitles
+                                                       ├─► Original transcript
+                                                       └─► Translated transcript
 ```
 
-The app no longer plays translated audio. The Live Translation API still returns translated
-audio internally because that is the response modality supported by the translation model; live-trans
-does not route that audio to an output device. This keeps the application subtitles-only and removes
-all local TTS/playback controls.
+On macOS, system audio is captured through a Core Audio process tap. On Windows, the native WASAPI process-loopback helper captures the system mix while excluding the application's own process tree.
+
+The application does **not** play the translated audio returned by the Live API. The output is intentionally subtitles-only.
+
+## Download
+
+Prebuilt artifacts are generated automatically by GitHub Actions.
+
+- **Windows** — installer package
+- **macOS Apple Silicon** — `.dmg`
+
+See the [Actions](https://github.com/maxud1980/translator/actions) page for the latest successful build artifacts.
 
 ## Requirements
 
-- **macOS 14.2+** (Core Audio taps) or **Windows 10 build 20348+ / Windows 11** (WASAPI
-  process loopback). Linux not supported yet — see Roadmap.
-- A **Gemini API key** with access to the `gemini-3.5-live-translate-preview` model.
-- [Bun](https://bun.sh) (used as the package manager / runner).
+- **macOS 14.2+** or **Windows 10 build 20348+ / Windows 11**
+- A Gemini API key with access to the required Gemini Live translation model
+- [Bun](https://bun.sh) for development/building
 
-## Run
+Linux is not supported yet.
+
+## Run from source
 
 ```bash
 bun install
 bun run dev
 ```
 
-Then in the app: paste your API key (stored encrypted in the OS keychain), pick a target
-source/target languages and an audio input (system audio or microphone), then hit **Enable translation**. Grant the macOS audio-recording
-permission when prompted. Microphone input may also request microphone permission from the OS.
+For production builds:
 
-## Scripts
+```bash
+bun run build
+```
 
-- `bun run dev` — run the app (electron-vite)
-- `bun run build` — production build
-- `bun run typecheck` — TypeScript check
+## Project structure
 
-## Stack
+- `src/main` — Electron main process and native audio capture orchestration
+- `src/preload` — secure renderer/main IPC bridge
+- `src/renderer` — React UI and audio clients
+- `native/win-audio-capture` — Windows WASAPI process-loopback helper
+- `.github/workflows/build.yml` — automated Windows/macOS builds
 
-Electron · electron-vite · React · TypeScript · Tailwind v4 · [audiotee](https://www.npmjs.com/package/audiotee) (macOS Core Audio tap) · a native WASAPI process-loopback helper ([`native/win-audio-capture`](native/win-audio-capture)) on Windows · Gemini Live API (raw WebSocket, `v1alpha`)
+## Roadmap
 
-## Roadmap / next steps
-
-1. **Pricing accuracy** — rates are editable estimates ($10/1M in+out by default); replace
-   with official `gemini-3.5-live-translate-preview` numbers when published.
-2. **UX** — source-language badge (from transcript `languageCode`), adjustable subtitle font,
-   save/export transcript, global hotkey to toggle, optional "capture only one app"
-   (`--include-processes`) mode.
-3. **Linux support** — a PipeWire / PulseAudio loopback capture path behind the same
-   `capture:*` IPC.
-
-Done: ✅ session resumption + auto-reconnect · ✅ signed & notarized `.dmg` packaging ·
-✅ Windows support (WASAPI process-loopback capture).
-
-## Notes
-
-- The API key never leaves the machine: encrypted via Electron `safeStorage`, persisted in
-  `electron-store`. Lifetime spend is tracked locally.
-- Transcripts arrive as incremental deltas and are appended; `usageMetadata` is per-message
-  incremental and is accumulated for the cost meter.
-
-## Support
-
-If live-trans saves you some time, you can buy me a coffee — it genuinely helps me keep
-building and shipping. Thank you! ☕
-
-[![Buy me a coffee on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/minhnhat165)
+- Fresh current UI screenshots and demo media
+- Transcript export
+- Adjustable subtitle appearance
+- Global hotkey
+- Optional single-application capture
+- Linux PipeWire/PulseAudio capture
 
 ## License
 
-[PolyForm Noncommercial License 1.0.0](LICENSE) — you're free to use, study, and modify
-live-trans for **noncommercial** purposes (personal use, learning, research, hobby projects).
-**Commercial use is not permitted** without a separate license. If you'd like to use it
-commercially, reach out.
+This repository is released under the **PolyForm Noncommercial License 1.0.0**.
+
+You may use, study and modify the project for noncommercial purposes. Commercial use requires a separate license.
+
+Because this project is based on the original **Live Trans** by Minh Nhật Nguyễn, please also respect the upstream project's license and attribution requirements.
+
+## Credits
+
+**Original Live Trans:** [Minh Nhật Nguyễn](https://github.com/minhnhat165)  
+**Original repository:** https://github.com/minhnhat165/live-trans
+
+**Remake / current repository:** [maxud1980/translator](https://github.com/maxud1980/translator)
