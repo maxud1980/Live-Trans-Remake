@@ -107,12 +107,8 @@ export default function App(): React.JSX.Element {
     setOriginal('')
     setTranslated('')
 
-    // The macOS microphone permission is only needed for microphone input.
-    // System audio capture via AudioTee uses macOS's separate System Audio Recording
-    // permission and must not trigger the microphone prompt.
-    if (audioSourceId !== SYSTEM_AUDIO_ID) {
-      await window.api.ensureAudioPermission()
-    }
+    // Microphone permission is requested by getUserMedia() only when microphone input
+    // is actually started. System audio capture must never request microphone access.
     await refreshDevices()
 
     const client = new LiveTranslateClient()
