@@ -83,6 +83,7 @@ function createWindow(): void {
 //   - macOS:   audiotee (Core Audio process tap), excluding our audio.mojom.AudioService PID(s).
 //   - Windows: live-trans-capture.exe (WASAPI process loopback), excluding our whole process tree.
 let audioProc: ChildProcessWithoutNullStreams | null = null
+let captureActive = false
 let pcmLeftover: Buffer<ArrayBufferLike> = Buffer.alloc(0)
 const FRAME_BYTES = 3200 // 100ms @ 16kHz, 16-bit mono
 
@@ -189,6 +190,12 @@ function rms16(buf: Buffer): number {
 }
 
 function stopCapture(): void {
+  captureActive = false
+  pcmLeftover = Buffer.alloc(0)
+}
+
+function disposeCaptureProcess(): void {
+  captureActive = false
   if (audioProc) {
     try {
       audioProc.kill()
@@ -200,8 +207,9 @@ function stopCapture(): void {
   pcmLeftover = Buffer.alloc(0)
 }
 
-ipcMain.handle('capture:start', () => {
-  stopCapture()
+function startCaptureProcess(): { ok: boolean; error?: string } {
+  if (audioProc) return { ok: true }
+
   const spec = captureSpawnSpec()
   if ('error' in spec) {
     return { ok: false, error: spec.error }
@@ -221,10 +229,12 @@ ipcMain.handle('capture:start', () => {
     while (pcmLeftover.length - offset >= FRAME_BYTES) {
       const frame = pcmLeftover.subarray(offset, offset + FRAME_BYTES)
       offset += FRAME_BYTES
-      mainWindow?.webContents.send('capture:pcm', {
-        b64: frame.toString('base64'),
-        rms: rms16(frame)
-      })
+      if (captureActive) {
+        mainWindow?.webContents.send('capture:pcm', {
+          b64: frame.toString('base64'),
+          rms: rms16(frame)
+        })
+      }
     }
     pcmLeftover = offset > 0 ? Buffer.from(pcmLeftover.subarray(offset)) : pcmLeftover
   })
@@ -261,6 +271,12 @@ ipcMain.handle('capture:start', () => {
   })
 
   return { ok: true }
+}
+
+ipcMain.handle('capture:start', () => {
+  const res = startCaptureProcess()
+  if (res.ok) captureActive = true
+  return res
 })
 
 ipcMain.handle('capture:stop', () => {
@@ -268,7 +284,7 @@ ipcMain.handle('capture:stop', () => {
   return true
 })
 
-app.on('before-quit', stopCapture)
+app.on('before-quit', disposeCaptureProcess)
 
 // ---- IPC ----
 ipcMain.handle('settings:get', () => ({
@@ -329,10 +345,8 @@ ipcMain.handle('settings:setPrefs', (_e, prefs: Partial<Persisted>) => {
 })
 
 app.whenReady().then(() => {
-  // Native macOS TCC consent is requested explicitly before microphone capture.
-  // Once macOS has granted it, also grant Chromium's media permission for this
-  // local renderer so getUserMedia() does not start a second permission flow.
-  // System-audio mode never touches this path because it does not call getUserMedia().
+  // Native macOS TCC consent is requested once during application startup.
+  // Translation sessions never request permissions again.
   const ses = session.defaultSession
   ses.setPermissionCheckHandler((_webContents, permission, _requestingOrigin, details) => {
     if (permission !== 'media') return false
@@ -349,6 +363,28 @@ app.whenReady().then(() => {
   })
 
   createWindow()
+
+  // Warm up both capture permission paths once at application startup.
+  // Microphone uses the native TCC request; system audio starts AudioTee and keeps
+  // its Core Audio tap alive for the lifetime of the app. Translation sessions
+  // then only enable/disable forwarding of already-authorized audio.
+  void (async () => {
+    if (process.platform !== 'darwin') return
+
+    await (async () => {
+      const status = systemPreferences.getMediaAccessStatus('microphone')
+      if (status === 'not-determined') {
+        try {
+          await systemPreferences.askForMediaAccess('microphone')
+        } catch {
+          // The status is checked again when microphone capture is requested.
+        }
+      }
+    })()
+
+    startCaptureProcess()
+  })()
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
