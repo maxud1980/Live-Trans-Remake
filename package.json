@@ -1,38 +1,38 @@
 {
-	"name": "live-trans",
-	"version": "0.1.0",
-	"description": "Real-time desktop translator for system audio, powered by Gemini 3.5 Live Translate",
-	"main": "out/main/index.js",
-	"author": "minhnhat165",
-	"license": "SEE LICENSE IN LICENSE",
-	"scripts": {
-		"dev": "electron-vite dev",
-		"build": "electron-vite build",
-		"preview": "electron-vite preview",
-		"typecheck": "tsc --noEmit -p tsconfig.json",
-		"dist:mac": "electron-vite build && electron-builder --mac",
-		"pack:mac": "electron-vite build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac dir --arm64 -c.mac.notarize=false",
-		"build:win-helper": "cmake -S native/win-audio-capture -B native/win-audio-capture/build -A x64 && cmake --build native/win-audio-capture/build --config Release",
-		"dist:win": "bun run build:win-helper && electron-vite build && electron-builder --win",
-		"pack:win": "bun run build:win-helper && electron-vite build && electron-builder --win dir"
-	},
-	"dependencies": {
-		"audiotee": "^0.0.7",
-		"electron-store": "^8.2.0"
-	},
-	"devDependencies": {
-		"@tailwindcss/vite": "^4.1.7",
-		"@types/node": "^22.15.0",
-		"@types/react": "^19.1.0",
-		"@types/react-dom": "^19.1.0",
-		"@vitejs/plugin-react": "^4.3.4",
-		"electron": "^36.2.0",
-		"electron-builder": "^26.15.2",
-		"electron-vite": "^4.0.0",
-		"react": "^19.1.0",
-		"react-dom": "^19.1.0",
-		"tailwindcss": "^4.1.7",
-		"typescript": "^5.8.3",
-		"vite": "^6.3.5"
-	}
+  "name": "live-trans",
+  "version": "0.1.1",
+  "description": "Real-time desktop translator for system audio, powered by Gemini 3.5 Live Translate",
+  "main": "out/main/index.js",
+  "author": "minhnhat165",
+  "license": "SEE LICENSE IN LICENSE",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "dist:mac": "electron-vite build && electron-builder --mac",
+    "pack:mac": "electron-vite build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac dir --arm64 -c.mac.notarize=false",
+    "build:win-helper": "cmake -S native/win-audio-capture -B native/win-audio-capture/build -A x64 && cmake --build native/win-audio-capture/build --config Release",
+    "dist:win": "bun run build:win-helper && electron-vite build && electron-builder --win",
+    "pack:win": "bun run build:win-helper && electron-vite build && electron-builder --win dir"
+  },
+  "dependencies": {
+    "audiotee": "^0.0.7",
+    "electron-store": "^8.2.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.7",
+    "@types/node": "^22.15.0",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^36.2.0",
+    "electron-builder": "^26.15.2",
+    "electron-vite": "^4.0.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "tailwindcss": "^4.1.7",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5"
+  }
 }
