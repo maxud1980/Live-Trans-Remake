@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.5] — 2026-10-05
+
+### Fixed
+- Explicitly handle Electron media permission requests so repeated microphone capture attempts do not reopen the permission flow.
+- System-audio mode no longer enumerates microphone devices during startup.
+
 ## [0.1.4] — 2026-10-05
 
 ### Fixed
