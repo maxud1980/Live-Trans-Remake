@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.6] — 2026-10-05
+
+### Fixed
+- Removed the macOS Audio Input entitlement that was unnecessarily requesting microphone access from the packaged app and its child processes.
+- Restored microphone device enumeration on startup so input devices are available in the device selector before the first translation.
+- Show generic microphone names when macOS has not yet exposed device labels.
+- Corrected the macOS microphone and system-audio usage descriptions.
+
 ## [0.1.5] — 2026-10-05
 
 ### Fixed
