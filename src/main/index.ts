@@ -449,7 +449,6 @@ app.whenReady().then(() => {
   })
 
   createWindow()
-  debugLog('capture-startup-result', startCaptureProcess())
 
   // Warm up system-audio capture once at application startup.
   if (process.platform === 'darwin') {
