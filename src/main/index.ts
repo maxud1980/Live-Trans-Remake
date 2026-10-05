@@ -4,6 +4,18 @@ import { appendFileSync, existsSync, mkdirSync } from 'node:fs'
 import { spawn, execSync, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import Store from 'electron-store'
 
+// Chromium/native diagnostic logging. Keep enabled for this troubleshooting build so we can
+// see media/WebRTC activity that never reaches Electron's JS permission handlers.
+const chromiumDebugLogPath = join(app.getPath('userData'), 'chromium-debug.log')
+try {
+  mkdirSync(dirname(chromiumDebugLogPath), { recursive: true })
+  app.commandLine.appendSwitch('enable-logging', 'file')
+  app.commandLine.appendSwitch('log-file', chromiumDebugLogPath)
+  app.commandLine.appendSwitch('v', '1')
+} catch {
+  // Diagnostic logging must never prevent the app from starting.
+}
+
 type Persisted = {
   apiKeyEnc?: string // base64 of safeStorage-encrypted API key
   sourceLang: string
