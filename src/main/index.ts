@@ -442,8 +442,6 @@ app.whenReady().then(() => {
     os: process.getSystemVersion(),
     microphoneStatus: process.platform === 'darwin' ? systemPreferences.getMediaAccessStatus('microphone') : 'n/a'
   })
-  // Native macOS TCC consent is requested once during application startup.
-  // Translation sessions never request permissions again.
   const ses = session.defaultSession
   ses.setPermissionCheckHandler((_webContents, permission, requestingOrigin, details) => {
     debugLog('permission-check', { permission, requestingOrigin, details })
