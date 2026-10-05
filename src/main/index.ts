@@ -288,14 +288,37 @@ ipcMain.handle('perm:microphoneStatus', () => {
   return systemPreferences.getMediaAccessStatus('microphone')
 })
 
+let microphonePermissionRequest: Promise<boolean> | null = null
+
 ipcMain.handle('perm:requestMicrophone', async () => {
   if (process.platform !== 'darwin') return true
-  if (systemPreferences.getMediaAccessStatus('microphone') === 'granted') return true
-  try {
-    return await systemPreferences.askForMediaAccess('microphone')
-  } catch {
-    return false
-  }
+
+  const status = systemPreferences.getMediaAccessStatus('microphone')
+  if (status === 'granted') return true
+  if (status === 'denied' || status === 'restricted') return false
+  if (microphonePermissionRequest) return microphonePermissionRequest
+
+  microphonePermissionRequest = (async () => {
+    try {
+      const granted = await systemPreferences.askForMediaAccess('microphone')
+      if (!granted) return false
+
+      // macOS can resolve requestAccessForMediaType before the TCC status
+      // observable by Chromium has caught up. Do not let getUserMedia race
+      // that transition and trigger a second native permission dialog.
+      for (let i = 0; i < 20; i++) {
+        if (systemPreferences.getMediaAccessStatus('microphone') === 'granted') return true
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      }
+      return systemPreferences.getMediaAccessStatus('microphone') === 'granted'
+    } catch {
+      return false
+    } finally {
+      microphonePermissionRequest = null
+    }
+  })()
+
+  return microphonePermissionRequest
 })
 
 ipcMain.handle('settings:setPrefs', (_e, prefs: Partial<Persisted>) => {
