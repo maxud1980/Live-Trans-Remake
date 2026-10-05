@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import { LANGUAGES, shortLabel } from './lib/languages'
 import { SystemAudioCapture } from './audio/capture'
 import { MicrophoneAudioCapture } from './audio/microphone'
@@ -326,9 +326,6 @@ export default function App(): React.JSX.Element {
           <Meter level={level} active={running} />
         </div>
 
-        <div className="flex items-center gap-2">
-          {/* Source signal meter remains here as the only live audio-level indicator. */}
-        </div>
       </footer>
 
       {/* ---- Status line ---- */}
