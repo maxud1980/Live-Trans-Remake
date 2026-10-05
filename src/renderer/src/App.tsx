@@ -8,10 +8,6 @@ type Status = 'idle' | 'connecting' | 'listening' | 'error'
 type AudioDevice = { deviceId: string; label: string }
 const SYSTEM_AUDIO_ID = '__system_audio__'
 
-// Ko-fi (PayPal-backed, works for Vietnam) — opens in the default browser via the
-// window-open handler. TODO: replace `your-username` with your actual Ko-fi username.
-const KOFI_URL = 'https://ko-fi.com/minhnhat165'
-
 // Transcripts stream for the whole length of a video; cap the retained text so a long
 // session can't grow an unbounded string that re-renders slower and slower.
 const MAX_TRANSCRIPT_CHARS = 8000
@@ -55,6 +51,7 @@ export default function App(): React.JSX.Element {
 
   const running = status === 'connecting' || status === 'listening'
   const targetName = shortLabel(targetLang)
+  const sourceName = sourceLang === 'auto' ? 'Auto-detect' : shortLabel(sourceLang)
 
   // ---- initial load ----
   useEffect(() => {
@@ -246,16 +243,6 @@ export default function App(): React.JSX.Element {
             <span className={`h-1.5 w-1.5 rounded-full ${dot} ${running ? 'animate-pulse' : ''}`} />
             {STATUS_LABEL[status]}
           </span>
-          <a
-            href={KOFI_URL}
-            target="_blank"
-            rel="noreferrer"
-            className="flex h-8 items-center gap-1.5 rounded-lg border border-amber-400/25 bg-amber-400/10 px-2.5 text-[11px] font-medium text-amber-300 transition hover:border-amber-400/40 hover:bg-amber-400/15"
-            title="Support on Ko-fi"
-          >
-            <CoffeeIcon />
-            <span>Coffee</span>
-          </a>
           <button
             onClick={() => setShowSettings(true)}
             className="grid h-8 w-8 place-items-center rounded-lg border border-border bg-surface text-muted transition hover:border-border-strong hover:text-foreground"
@@ -270,7 +257,7 @@ export default function App(): React.JSX.Element {
       {/* ---- Transcripts ---- */}
       <main className="grid min-h-0 flex-1 grid-cols-2 gap-3 px-4 pb-3 pt-3">
         <Column
-          title="Original"
+          title={sourceName}
           accent={false}
           innerRef={origRef}
           text={original}
@@ -344,14 +331,13 @@ export default function App(): React.JSX.Element {
         />
       )}
 
-      {/* ---- Usage modal ---- */}
     </div>
   )
 }
 
 /* =========================== Transcript column =========================== */
 
-// Memoized so VU-meter/cost re-renders (~10/s) don't re-render the growing transcript text.
+// Memoized so frequent VU-meter updates don't re-render the growing transcript text.
 const Column = memo(function Column(props: {
   title: string
   accent: boolean
@@ -427,7 +413,6 @@ function Meter({ level, active }: { level: number; active: boolean }): React.JSX
   )
 }
 
-/* =========================== Stat =========================== */
 
 /* =========================== Settings modal =========================== */
 
@@ -501,135 +486,6 @@ function SettingsModal(props: {
           </button>
         </div>
       </div>
-    </div>
-  )
-}
-
-/* =========================== Usage modal =========================== */
-
-function UsageModal(props: {
-  onClose: () => void
-  usage: Usage
-  sessionCost: number
-  totalCost: number
-  rates: { input: number; output: number }
-  running: boolean
-  onResetTotal: () => void
-}): React.JSX.Element {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') props.onClose()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [props])
-
-  const { usage, rates } = props
-  const totalTokens = usage.inputTokens + usage.outputTokens
-  const audio = estimateAudioSeconds(usage)
-  const inCost = (usage.inputTokens / 1_000_000) * rates.input
-  const outCost = (usage.outputTokens / 1_000_000) * rates.output
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex animate-fade-in items-center justify-center bg-black/55 p-6 backdrop-blur-sm"
-      onClick={props.onClose}
-    >
-      <div
-        className="no-drag flex max-h-[88vh] w-full max-w-md animate-pop-in flex-col overflow-hidden rounded-2xl border border-border-strong bg-surface shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* Header */}
-        <div className="flex items-center justify-between border-b border-border px-5 py-4">
-          <div>
-            <h2 className="text-sm font-semibold">Token usage</h2>
-            <p className="text-[11px] text-muted">
-              {props.running ? 'Live — this session so far' : 'This session'}
-            </p>
-          </div>
-          <button
-            onClick={props.onClose}
-            className="grid h-7 w-7 place-items-center rounded-lg text-muted transition hover:bg-elevated hover:text-foreground"
-          >
-            <CloseIcon />
-          </button>
-        </div>
-
-        {/* Body */}
-        <div className="flex-1 space-y-4 overflow-y-auto px-5 py-5">
-          {/* Token breakdown */}
-          <div className="grid grid-cols-2 gap-3">
-            <UsageCard
-              label="Input"
-              value={formatTokens(usage.inputTokens)}
-              unit="tok"
-              sub={`≈ ${formatDuration(audio.input)} audio · ${formatUsd(inCost)}`}
-            />
-            <UsageCard
-              label="Output"
-              value={formatTokens(usage.outputTokens)}
-              unit="tok"
-              sub={`≈ ${formatDuration(audio.output)} audio · ${formatUsd(outCost)}`}
-              accent
-            />
-          </div>
-
-          {/* Total + cost */}
-          <div className="grid grid-cols-2 gap-3">
-            <UsageCard label="Total tokens" value={formatTokens(totalTokens)} unit="tok" />
-            <UsageCard label="Session cost" value={formatUsd(props.sessionCost)} />
-          </div>
-
-          {/* All-time */}
-          <div className="flex items-center justify-between rounded-xl border border-border bg-background/40 px-4 py-3">
-            <div>
-              <div className="text-[10px] font-medium uppercase tracking-[0.08em] text-faint">
-                Total spent · all time
-              </div>
-              <div className="font-mono text-[17px] font-semibold tabular-nums text-foreground">
-                {formatUsd(props.totalCost)}
-              </div>
-            </div>
-            <button
-              onClick={props.onResetTotal}
-              className="rounded-lg border border-border px-3 py-1.5 text-[11px] font-medium text-muted transition hover:border-red-400/40 hover:text-red-400"
-            >
-              Reset
-            </button>
-          </div>
-
-          <p className="text-[11px] leading-relaxed text-faint">
-            Token counts come straight from the API. Cost = tokens × your rates
-            (input&nbsp;${rates.input}/1M, output&nbsp;${rates.output}/1M — editable in
-            Settings). Audio estimates assume ~32 tok/s in, ~25 tok/s out.
-          </p>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function UsageCard(props: {
-  label: string
-  value: string
-  unit?: string
-  sub?: string
-  accent?: boolean
-}): React.JSX.Element {
-  return (
-    <div className="rounded-xl border border-border bg-background/40 px-4 py-3">
-      <div
-        className={`text-[10px] font-semibold uppercase tracking-[0.08em] ${
-          props.accent ? 'text-accent' : 'text-faint'
-        }`}
-      >
-        {props.label}
-      </div>
-      <div className="font-mono text-[17px] font-semibold tabular-nums text-foreground">
-        {props.value}
-        {props.unit && <span className="ml-1 text-[11px] font-normal text-faint">{props.unit}</span>}
-      </div>
-      {props.sub && <div className="mt-0.5 text-[10px] text-faint">{props.sub}</div>}
     </div>
   )
 }
@@ -729,16 +585,6 @@ function GearIcon(): React.JSX.Element {
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <circle cx="12" cy="12" r="3" />
       <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-    </svg>
-  )
-}
-
-function CoffeeIcon(): React.JSX.Element {
-  return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M17 8h1a4 4 0 1 1 0 8h-1" />
-      <path d="M3 8h14v9a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4Z" />
-      <path d="M6 2v2M10 2v2M14 2v2" />
     </svg>
   )
 }
