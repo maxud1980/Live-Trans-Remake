@@ -1,3 +1,10 @@
+## [0.1.10] — 2026-10-05
+
+### Fixed
+- Moved macOS microphone and system-audio permission warm-up to application startup instead of translation start.
+- Kept the macOS system-audio Core Audio tap alive for the lifetime of the application, preventing repeated system-audio permission prompts between translation sessions.
+- Translation sessions now reuse the already-authorized capture paths and no longer request microphone permission themselves.
+
 ## [0.1.9] — 2026-10-05
 
 ### Fixed
