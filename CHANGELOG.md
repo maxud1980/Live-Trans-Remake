@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.3] — 2026-10-05
+
+### Fixed
+- Fixed the macOS microphone permission prompt repeating when using system audio capture.
+- Microphone permission is now requested only when microphone input is selected; system audio uses macOS System Audio Recording permission through AudioTee.
+
 ## [0.1.2] — 2026-10-05
 
 ### Changed
