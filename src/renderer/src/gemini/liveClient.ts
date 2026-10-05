@@ -1,5 +1,3 @@
-import { parseUsage, type Usage } from '../lib/cost'
-
 const WS_BASE =
   'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent'
 
@@ -30,7 +28,6 @@ export type LiveHandlers = {
   onOutputTranscript: (delta: string) => void
   onTurnComplete: () => void
   onInterrupted: () => void
-  onUsage: (usage: Usage) => void
   onError: (message: string) => void
   // Terminal close only: user stopped, or we gave up after exhausting retries.
   onClose: (info: { code: number; reason: string }) => void
@@ -201,9 +198,6 @@ export class LiveTranslateClient {
       if (server.turnComplete) handlers.onTurnComplete()
     }
 
-    if (msg.usageMetadata) {
-      handlers.onUsage(parseUsage(msg.usageMetadata))
-    }
 
     if (msg.error) {
       const e = msg.error
