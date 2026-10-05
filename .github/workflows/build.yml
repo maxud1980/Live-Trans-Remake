@@ -23,15 +23,15 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Build Windows package
-        run: bun run dist:win -- --publish never
+        run: bunx electron-builder --win --publish never
 
       - name: Upload Windows build
         uses: actions/upload-artifact@v4
         with:
           name: live-trans-windows
           path: |
-            dist/*.exe
-            dist/*.msi
+            release/*.exe
+            release/*.msi
           if-no-files-found: error
 
   build-macos:
@@ -50,11 +50,11 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Build macOS package
-        run: bun run dist:mac -- --publish never
+        run: bunx electron-builder --mac --publish never
 
       - name: Upload macOS build
         uses: actions/upload-artifact@v4
         with:
           name: live-trans-macos-arm64
-          path: dist/*.dmg
+          path: release/*.dmg
           if-no-files-found: error
