@@ -11,6 +11,8 @@ export type AppSettings = {
 }
 
 const api = {
+  debugLog: (event: string, data?: unknown): Promise<boolean> => ipcRenderer.invoke('debug:log', event, data),
+  getDebugLogPath: (): Promise<string> => ipcRenderer.invoke('debug:getPath'),
   getSettings: (): Promise<AppSettings> => ipcRenderer.invoke('settings:get'),
   setApiKey: (key: string): Promise<boolean> => ipcRenderer.invoke('settings:setApiKey', key),
   setPrefs: (prefs: {
