@@ -1,3 +1,10 @@
+## [0.1.11] — 2026-10-05
+
+### Fixed
+- Removed the second independent macOS microphone permission request from the main process.
+- Microphone consent is now requested through one renderer startup path, then microphone devices are enumerated after consent is complete.
+- Fixed the microphone input list disappearing at startup while System Audio remained the only visible source.
+
 ## [0.1.10] — 2026-10-05
 
 ### Fixed
