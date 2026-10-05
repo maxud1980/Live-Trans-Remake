@@ -111,18 +111,17 @@ export default function App(): React.JSX.Element {
       return
     }
     setStatus('connecting')
-    setMessage(audioSourceId === SYSTEM_AUDIO_ID ? 'Connecting — preparing system audio…' : 'Connecting — requesting microphone permission…')
+    setMessage(audioSourceId === SYSTEM_AUDIO_ID ? 'Connecting — preparing system audio…' : 'Connecting — preparing microphone…')
     setOriginal('')
     setTranslated('')
 
-    // Do not enumerate microphone devices while using System Audio. On macOS,
-    // keep microphone TCC completely untouched until the user explicitly chooses
-    // microphone input.
+    // Permissions are requested once when the app starts. A translation session
+    // only checks the already-granted microphone state and never asks macOS again.
     if (audioSourceId !== SYSTEM_AUDIO_ID) {
-      const microphoneAllowed = await window.api.requestMicrophonePermission()
-      if (!microphoneAllowed) {
+      const microphoneStatus = await window.api.microphonePermissionStatus()
+      if (microphoneStatus !== 'granted') {
         setStatus('error')
-        setMessage('Microphone permission was denied. Enable it in System Settings → Privacy & Security → Microphone.')
+        setMessage('Microphone permission is not enabled. Enable it in System Settings → Privacy & Security → Microphone, then restart live-trans.')
         startingRef.current = false
         return
       }
@@ -218,23 +217,6 @@ export default function App(): React.JSX.Element {
 
   async function onAudioSourceChange(id: string): Promise<void> {
     if (running || startingRef.current) return
-    if (id === '__request_microphone__') {
-      if (isMac) {
-        const allowed = await window.api.requestMicrophonePermission()
-        if (!allowed) {
-          setMessage('Microphone permission was denied. Enable it in System Settings → Privacy & Security → Microphone.')
-          return
-        }
-      }
-      await refreshDevices()
-      const devices = await navigator.mediaDevices.enumerateDevices()
-      const firstInput = devices.find((d) => d.kind === 'audioinput')
-      if (firstInput?.deviceId) {
-        setAudioSourceId(firstInput.deviceId)
-        await window.api.setPrefs({ audioSourceId: firstInput.deviceId })
-      }
-      return
-    }
     setAudioSourceId(id)
     void window.api.setPrefs({ audioSourceId: id })
   }
@@ -347,9 +329,7 @@ export default function App(): React.JSX.Element {
             <Select value={audioSourceId} onChange={onAudioSourceChange}>
               <option value={SYSTEM_AUDIO_ID}>System audio</option>
               {audioDevices.map((d) => <option key={d.deviceId} value={d.deviceId}>🎤 {d.label}</option>)}
-              {isMac && audioDevices.length === 0 && (
-                <option value="__request_microphone__">🎤 Enable microphone…</option>
-              )}
+
             </Select>
           </div>
           <Meter level={level} active={running} />
