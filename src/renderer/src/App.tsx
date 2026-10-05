@@ -110,7 +110,7 @@ export default function App(): React.JSX.Element {
       startingRef.current = false
       return
     }
-    setStatus('connecting'
+    setStatus('connecting')
     setMessage(audioSourceId === SYSTEM_AUDIO_ID ? 'Connecting — preparing system audio…' : 'Connecting — requesting microphone permission…')
     setOriginal('')
     setTranslated('')
