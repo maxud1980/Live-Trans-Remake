@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, safeStorage, shell } from 'electron'
+import { app, BrowserWindow, ipcMain, safeStorage, shell, session } from 'electron'
 import { join, dirname } from 'node:path'
 import { existsSync } from 'node:fs'
 import { spawn, execSync, type ChildProcessWithoutNullStreams } from 'node:child_process'
@@ -291,6 +291,20 @@ ipcMain.handle('settings:setPrefs', (_e, prefs: Partial<Persisted>) => {
 })
 
 app.whenReady().then(() => {
+  // The app is the sole owner of this local renderer. Handle Chromium's media
+  // permission layer explicitly so repeated getUserMedia calls do not re-open
+  // Electron's permission request flow. macOS TCC remains the final authority.
+  session.defaultSession.setPermissionCheckHandler((_webContents, permission) => {
+    return permission === 'media'
+  })
+  session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback, details) => {
+    if (permission === 'media') {
+      const mediaTypes = details && 'mediaTypes' in details ? details.mediaTypes : []
+      return callback(mediaTypes.includes('audio'))
+    }
+    callback(false)
+  })
+
   createWindow()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
