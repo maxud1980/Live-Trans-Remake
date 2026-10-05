@@ -296,10 +296,13 @@ function startCaptureProcess(): { ok: boolean; error?: string } {
     pcmLeftover = offset > 0 ? Buffer.from(pcmLeftover.subarray(offset)) : pcmLeftover
   })
 
-  // AudioTee emits structured JSON log lines on stderr; only surface real errors.
+  // Keep the complete helper stderr in our diagnostic log. AudioTee normally emits
+  // structured JSON, but non-JSON native/CoreAudio diagnostics are equally important here.
   let lastError = ''
   proc.stderr.on('data', (d: Buffer) => {
-    for (const line of d.toString('utf8').split('\n')) {
+    const raw = d.toString('utf8')
+    debugLog('capture-process-stderr', { pid: proc.pid, data: raw })
+    for (const line of raw.split('\n')) {
       const trimmed = line.trim()
       if (!trimmed) continue
       try {
