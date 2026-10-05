@@ -364,26 +364,12 @@ app.whenReady().then(() => {
 
   createWindow()
 
-  // Warm up both capture permission paths once at application startup.
-  // Microphone uses the native TCC request; system audio starts AudioTee and keeps
-  // its Core Audio tap alive for the lifetime of the app. Translation sessions
-  // then only enable/disable forwarding of already-authorized audio.
-  void (async () => {
-    if (process.platform !== 'darwin') return
-
-    await (async () => {
-      const status = systemPreferences.getMediaAccessStatus('microphone')
-      if (status === 'not-determined') {
-        try {
-          await systemPreferences.askForMediaAccess('microphone')
-        } catch {
-          // The status is checked again when microphone capture is requested.
-        }
-      }
-    })()
-
+  // Warm up system-audio capture once at application startup. Microphone consent
+  // is requested by the renderer through the single IPC path, so there cannot be
+  // two independent native microphone requests racing each other.
+  if (process.platform === 'darwin') {
     startCaptureProcess()
-  })()
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
