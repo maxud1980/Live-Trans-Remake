@@ -116,10 +116,7 @@ export default function App(): React.JSX.Element {
     transRef.current?.scrollTo({ top: transRef.current.scrollHeight })
   }, [translated])
 
-  // Microphone consent is decided ONCE by the main process via the native macOS API
-  // (askForMediaAccess, only while status is 'not-determined'). Only after the OS reports
-  // 'granted' do we touch getUserMedia — and then it can no longer prompt; it just unlocks
-  // device labels for enumerateDevices().
+  // Native macOS API is the only place that asks for microphone consent.
   async function ensureMicrophoneAccess(shouldPrime = isMac): Promise<boolean> {
     if (!shouldPrime) return true
     if (microphonePrimeRef.current) return microphonePrimeRef.current
@@ -136,7 +133,7 @@ export default function App(): React.JSX.Element {
           const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
           stream.getTracks().forEach((track) => track.stop())
         } catch (err) {
-          // Labels are cosmetic; capture start reports real errors.
+          // Device labels are cosmetic; capture start reports actual errors.
           void window.api.debugLog('devices.prime-microphone.labels-error', { error: String(err) })
         }
         void window.api.debugLog('devices.prime-microphone.success')
