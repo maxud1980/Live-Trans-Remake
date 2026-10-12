@@ -1,6 +1,4 @@
-# Own bundle id (NOT the upstream author's): macOS TCC stores permissions per bundle id + code
-# signature, so sharing an id with the original app (signed by a different team) makes the
-# stored consent fail its code requirement and the prompts reappear.
+# This fork uses its own bundle identifier so macOS TCC records do not collide with upstream.
 appId: com.maxud1980.live-trans-remake
 productName: live-trans
 copyright: Copyright © 2026 minhnhat165
@@ -26,18 +24,13 @@ mac:
     - target: dmg
       arch:
         - universal
-  # NO pinned identity here. The previous value was the upstream author's Developer ID, which
-  # does not exist on CI or on this machine, so electron-builder silently produced an UNSIGNED
-  # app ("no automatic ad-hoc fallback"). An unsigned/inconsistently signed app has no stable
-  # code identity, so macOS TCC cannot remember the microphone consent and asks again.
-  # CI passes `-c.mac.identity=-` (explicit ad-hoc) when no real certificate secret is set;
-  # with CSC_LINK / CSC_KEY_PASSWORD set, the Developer ID certificate is auto-discovered.
+  # Signing identity is selected by CI: Developer ID when CSC_LINK is provided, otherwise
+  # explicit ad-hoc signing via -c.mac.identity=-.
   hardenedRuntime: true
   gatekeeperAssess: false
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.inherit.plist
-  # Notarization is opt-in: pass `-c.mac.notarize=true` together with APPLE_ID /
-  # APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID (see docs/BUILD.md). Ad-hoc builds can't be notarized.
+  # Ad-hoc builds cannot be notarized. CI enables notarization only with credentials.
   notarize: false
   extendInfo:
     NSMicrophoneUsageDescription: live-trans uses your selected microphone as the translation source.
