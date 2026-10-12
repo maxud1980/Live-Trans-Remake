@@ -7,9 +7,6 @@ on:
       - main
     tags:
       - 'v*'
-  pull_request:
-    branches:
-      - main
 
 permissions:
   contents: write
@@ -59,7 +56,41 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Build macOS package
-        run: bun run dist:mac -- --publish never
+        env:
+          # Optional: real Developer ID certificate (base64 .p12) + password + notarization creds.
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -n "$CSC_LINK" ]; then
+            if [ -n "$APPLE_ID" ]; then
+              bun run dist:mac -- --publish never -c.mac.notarize=true
+            else
+              bun run dist:mac -- --publish never
+            fi
+          else
+            # No certificate: sign ad-hoc EXPLICITLY. Without this electron-builder leaves the
+            # app unsigned, and macOS TCC re-prompts for the microphone on every launch.
+            unset CSC_LINK CSC_KEY_PASSWORD
+            bun run dist:mac -- --publish never -c.mac.identity=-
+          fi
+
+      - name: Verify code signature and entitlements
+        run: |
+          APP="$(ls -d release/mac*/live-trans.app | head -1)"
+          echo "App: $APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          echo "--- main app"
+          codesign -dvv "$APP" 2>&1 | grep -E 'Identifier|Authority|Signature|TeamIdentifier|flags' || true
+          codesign -d --entitlements - "$APP" 2>&1 | grep -E 'audio-input' || (echo 'audio-input entitlement missing' && exit 1)
+          echo "--- helpers"
+          for h in "$APP"/Contents/Frameworks/*Helper*.app; do
+            echo "$h"; codesign -dvv "$h" 2>&1 | grep -E 'Identifier|Signature|TeamIdentifier' || true
+          done
+          echo "--- audiotee"
+          find "$APP" -path '*audiotee/bin/audiotee' -exec codesign -dvv {} \; 2>&1 | grep -E 'Identifier|Signature|flags' || true
 
       - name: Upload macOS build
         uses: actions/upload-artifact@v4
