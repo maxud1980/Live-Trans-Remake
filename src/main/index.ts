@@ -385,10 +385,6 @@ ipcMain.handle('perm:microphoneStatus', () => {
 
 let microphonePermissionRequest: Promise<boolean> | null = null
 
-// The ONE place the app asks macOS for microphone access.
-//  - Already decided (granted / denied / restricted): just report it, never prompt.
-//  - 'not-determined': call askForMediaAccess exactly once; concurrent callers share the promise.
-// getUserMedia() is NOT used to trigger consent anymore (see renderer ensureMicrophoneAccess).
 ipcMain.handle('perm:requestMicrophone', async () => {
   debugLog('microphone-permission-request-ipc')
   if (process.platform !== 'darwin') return true
@@ -396,7 +392,7 @@ ipcMain.handle('perm:requestMicrophone', async () => {
   const status = systemPreferences.getMediaAccessStatus('microphone')
   debugLog('microphone-permission-request-status', { status })
   if (status === 'granted') return true
-  if (status !== 'not-determined') return false // denied / restricted: macOS will not prompt again
+  if (status !== 'not-determined') return false // already decided: do not prompt again
   if (microphonePermissionRequest) {
     debugLog('microphone-permission-request-coalesced')
     return microphonePermissionRequest
@@ -419,7 +415,6 @@ ipcMain.handle('perm:requestMicrophone', async () => {
   return microphonePermissionRequest
 })
 
-// Opens System Settings → Privacy & Security → Microphone (used when access was denied earlier).
 ipcMain.handle('perm:openMicrophoneSettings', () =>
   shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone')
 )
@@ -454,8 +449,7 @@ app.whenReady().then(() => {
     if (process.platform !== 'darwin') return callback(true)
     const mediaTypes = (details && 'mediaTypes' in details ? details.mediaTypes : undefined) ?? []
     const wantsAudio = mediaTypes.length === 0 || mediaTypes.includes('audio')
-    // Grant the Chromium-level media permission only; the actual OS consent is requested once
-    // by perm:requestMicrophone (askForMediaAccess) and never by getUserMedia.
+    // Grant Chromium media permission only; OS consent is requested by askForMediaAccess.
     debugLog('permission-request-callback', { wantsAudio, allowed: wantsAudio })
     callback(wantsAudio)
   })
