@@ -22,6 +22,7 @@ export interface PreloadApi {
   }) => Promise<boolean>
   microphonePermissionStatus: () => Promise<string>
   requestMicrophonePermission: () => Promise<boolean>
+  openMicrophoneSettings: () => Promise<void>
   startCapture: () => Promise<{ ok: boolean; error?: string }>
   stopCapture: () => Promise<boolean>
   onCapturePcm: (cb: (frame: { b64: string; rms: number }) => void) => () => void
