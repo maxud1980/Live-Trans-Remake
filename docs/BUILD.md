@@ -54,6 +54,15 @@ spctl -a -vvv -t install "release/live-trans-$(node -p "require('./package.json'
 # → "source=Notarized Developer ID"  means good.
 ```
 
+## Microphone / System Audio permissions (TCC) and signing
+
+macOS TCC permissions depend on the app's code identity. For consistent testing:
+
+- CI uses an explicit ad-hoc signature if no Developer ID certificate is configured. Ad-hoc identity may change between builds, so permission consent may need to be granted again after updates.
+- A Developer ID certificate can be configured with `MAC_CSC_LINK` and `MAC_CSC_KEY_PASSWORD`; notarization additionally needs `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, and `APPLE_TEAM_ID`.
+- Run the app from `/Applications` when testing permission persistence.
+- To reset permissions for this fork: `tccutil reset All com.maxud1980.live-trans-remake`.
+
 ## Test the unsigned build (no certificate needed)
 
 To check packaging without signing — fast, arm64-only `.app` in `release/mac-arm64/`:
