@@ -385,6 +385,10 @@ ipcMain.handle('perm:microphoneStatus', () => {
 
 let microphonePermissionRequest: Promise<boolean> | null = null
 
+// The ONE place the app asks macOS for microphone access.
+//  - Already decided (granted / denied / restricted): just report it, never prompt.
+//  - 'not-determined': call askForMediaAccess exactly once; concurrent callers share the promise.
+// getUserMedia() is NOT used to trigger consent anymore (see renderer ensureMicrophoneAccess).
 ipcMain.handle('perm:requestMicrophone', async () => {
   debugLog('microphone-permission-request-ipc')
   if (process.platform !== 'darwin') return true
@@ -392,7 +396,7 @@ ipcMain.handle('perm:requestMicrophone', async () => {
   const status = systemPreferences.getMediaAccessStatus('microphone')
   debugLog('microphone-permission-request-status', { status })
   if (status === 'granted') return true
-  if (status === 'denied' || status === 'restricted') return false
+  if (status !== 'not-determined') return false // denied / restricted: macOS will not prompt again
   if (microphonePermissionRequest) {
     debugLog('microphone-permission-request-coalesced')
     return microphonePermissionRequest
@@ -402,21 +406,8 @@ ipcMain.handle('perm:requestMicrophone', async () => {
     try {
       debugLog('askForMediaAccess-start')
       const granted = await systemPreferences.askForMediaAccess('microphone')
-      debugLog('askForMediaAccess-result', { granted, status: systemPreferences.getMediaAccessStatus('microphone') })
-      if (!granted) return false
-
-      // macOS can resolve requestAccessForMediaType before the TCC status
-      // observable by Chromium has caught up. Do not let getUserMedia race
-      // that transition and trigger a second native permission dialog.
-      for (let i = 0; i < 20; i++) {
-        const polledStatus = systemPreferences.getMediaAccessStatus('microphone')
-        debugLog('microphone-permission-poll', { i, status: polledStatus })
-        if (polledStatus === 'granted') return true
-        await new Promise((resolve) => setTimeout(resolve, 50))
-      }
-      const finalStatus = systemPreferences.getMediaAccessStatus('microphone')
-      debugLog('microphone-permission-final', { status: finalStatus })
-      return finalStatus === 'granted'
+      debugLog('askForMediaAccess-result', { granted })
+      return granted
     } catch (err) {
       debugLog('microphone-permission-error', { error: err instanceof Error ? err.message : String(err) })
       return false
@@ -427,6 +418,11 @@ ipcMain.handle('perm:requestMicrophone', async () => {
 
   return microphonePermissionRequest
 })
+
+// Opens System Settings → Privacy & Security → Microphone (used when access was denied earlier).
+ipcMain.handle('perm:openMicrophoneSettings', () =>
+  shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone')
+)
 
 ipcMain.handle('settings:setPrefs', (_e, prefs: Partial<Persisted>) => {
   if (typeof prefs.sourceLang === 'string') store.set('sourceLang', prefs.sourceLang)
@@ -456,10 +452,10 @@ app.whenReady().then(() => {
     debugLog('permission-request', { permission, details, microphoneStatus: process.platform === 'darwin' ? systemPreferences.getMediaAccessStatus('microphone') : 'n/a' })
     if (permission !== 'media') return callback(false)
     if (process.platform !== 'darwin') return callback(true)
-    const mediaTypes = details && 'mediaTypes' in details ? details.mediaTypes : []
+    const mediaTypes = (details && 'mediaTypes' in details ? details.mediaTypes : undefined) ?? []
     const wantsAudio = mediaTypes.length === 0 || mediaTypes.includes('audio')
-    // Grant the Chromium media permission and let macOS TCC present at most one
-    // native microphone prompt. We do not call askForMediaAccess() separately.
+    // Grant the Chromium-level media permission only; the actual OS consent is requested once
+    // by perm:requestMicrophone (askForMediaAccess) and never by getUserMedia.
     debugLog('permission-request-callback', { wantsAudio, allowed: wantsAudio })
     callback(wantsAudio)
   })

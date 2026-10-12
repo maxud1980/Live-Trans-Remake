@@ -116,6 +116,10 @@ export default function App(): React.JSX.Element {
     transRef.current?.scrollTo({ top: transRef.current.scrollHeight })
   }, [translated])
 
+  // Microphone consent is decided ONCE by the main process via the native macOS API
+  // (askForMediaAccess, only while status is 'not-determined'). Only after the OS reports
+  // 'granted' do we touch getUserMedia — and then it can no longer prompt; it just unlocks
+  // device labels for enumerateDevices().
   async function ensureMicrophoneAccess(shouldPrime = isMac): Promise<boolean> {
     if (!shouldPrime) return true
     if (microphonePrimeRef.current) return microphonePrimeRef.current
@@ -123,8 +127,18 @@ export default function App(): React.JSX.Element {
     const promise = (async () => {
       try {
         void window.api.debugLog('devices.prime-microphone.begin')
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-        stream.getTracks().forEach((track) => track.stop())
+        const granted = await window.api.requestMicrophonePermission()
+        if (!granted) {
+          void window.api.debugLog('devices.prime-microphone.not-granted')
+          return false
+        }
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+          stream.getTracks().forEach((track) => track.stop())
+        } catch (err) {
+          // Labels are cosmetic; capture start reports real errors.
+          void window.api.debugLog('devices.prime-microphone.labels-error', { error: String(err) })
+        }
         void window.api.debugLog('devices.prime-microphone.success')
         return true
       } catch (err) {
@@ -191,7 +205,8 @@ export default function App(): React.JSX.Element {
       if (microphoneStatus !== 'granted') {
         void window.api.debugLog('app.start.microphone-not-granted', { microphoneStatus })
         setStatus('error')
-        setMessage('Microphone permission is not enabled. Enable it in System Settings → Privacy & Security → Microphone, then restart live-trans.')
+        setMessage('Microphone permission is not enabled. Opening System Settings → Privacy & Security → Microphone — enable live-trans there, then restart the app.')
+        void window.api.openMicrophoneSettings()
         startingRef.current = false
         return
       }

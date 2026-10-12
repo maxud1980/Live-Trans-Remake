@@ -22,6 +22,7 @@ const api = {
   }): Promise<boolean> => ipcRenderer.invoke('settings:setPrefs', prefs),
   microphonePermissionStatus: (): Promise<string> => ipcRenderer.invoke('perm:microphoneStatus'),
   requestMicrophonePermission: (): Promise<boolean> => ipcRenderer.invoke('perm:requestMicrophone'),
+  openMicrophoneSettings: (): Promise<void> => ipcRenderer.invoke('perm:openMicrophoneSettings'),
 
   // System-audio capture via AudioTee (Core Audio tap, excludes our own process tree).
   // Main streams 100ms PCM frames (base64 + rms) to the renderer over 'capture:pcm'.

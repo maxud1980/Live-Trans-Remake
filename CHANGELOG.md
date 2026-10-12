@@ -1,3 +1,11 @@
+## [0.1.12] — 2026-10-12
+
+### Fixed
+- Root cause of the repeating macOS microphone prompts: `electron-builder.yml` pinned the upstream author's Developer ID, which does not exist here, so builds were left unsigned. Without a stable code identity macOS TCC cannot remember consent. CI now signs explicitly (ad-hoc via `-c.mac.identity=-`, or with a real Developer ID if `MAC_CSC_LINK` secrets are set) and verifies signature + entitlements in the build log.
+- Changed `appId` to `com.maxud1980.live-trans-remake` so stale TCC records of the upstream app (different signing team) no longer conflict.
+- Microphone consent is now requested in one place only: native `askForMediaAccess`, and only while the status is `not-determined`. `getUserMedia` is used afterwards solely to unlock device labels and can no longer trigger a prompt.
+- If access was denied earlier, System Settings → Microphone is opened instead of failing silently.
+
 ## [0.1.11] — 2026-10-05
 
 ### Fixed

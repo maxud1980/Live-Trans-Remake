@@ -54,6 +54,19 @@ spctl -a -vvv -t install "release/live-trans-$(node -p "require('./package.json'
 # → "source=Notarized Developer ID"  means good.
 ```
 
+## Microphone / System Audio permissions (TCC) and signing
+
+macOS remembers a permission per *code identity* (bundle id + signature). Rules of thumb:
+
+- Never leave the app **unsigned**: consent can't be stored and the prompt returns on every launch.
+- **Ad-hoc** (`identity: "-"`, what CI does without a certificate) works, but the identity is the
+  build's hash, so each new build/update asks **once** again.
+- A **Developer ID** certificate (set `MAC_CSC_LINK`, `MAC_CSC_KEY_PASSWORD`, and optionally
+  `APPLE_ID` / `APPLE_APP_SPECIFIC_PASSWORD` / `APPLE_TEAM_ID` as repo secrets) gives a stable
+  identity: one prompt, ever, across updates.
+- Run the app from `/Applications` (not from the DMG or Downloads) to avoid Gatekeeper translocation.
+- To retest from scratch: `tccutil reset All com.maxud1980.live-trans-remake`.
+
 ## Test the unsigned build (no certificate needed)
 
 To check packaging without signing — fast, arm64-only `.app` in `release/mac-arm64/`:
