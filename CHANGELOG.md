@@ -1,3 +1,11 @@
+## [0.1.12] — 2026-10-12
+
+### Fixed
+- Replaced the pinned upstream Developer ID with explicit CI signing: ad-hoc when no certificate is configured, or Developer ID when signing secrets are provided. CI verifies the app signature and microphone entitlement.
+- Changed the bundle identifier to `com.maxud1980.live-trans-remake` to isolate this fork's macOS TCC permission records from the upstream app.
+- Centralized microphone consent in the native `askForMediaAccess` path, only when permission status is `not-determined`. Device enumeration uses `getUserMedia` only after consent.
+- If microphone access is already denied, the app opens System Settings → Privacy & Security → Microphone.
+
 ## [0.1.11] — 2026-10-05
 
 ### Fixed
