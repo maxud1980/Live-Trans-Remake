@@ -12,8 +12,10 @@ permissions:
   contents: write
 
 jobs:
+  # Both platforms build on every push to main and on manual runs, so a version can be
+  # downloaded from the run's Artifacts and tested before it is released. Only the
+  # "GitHub Release" job below is limited to version tags.
   build-windows:
-    if: startsWith(github.ref, 'refs/tags/v')
     name: Windows
     runs-on: windows-latest
     steps:
