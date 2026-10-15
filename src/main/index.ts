@@ -5,11 +5,16 @@ import { readdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { spawn, execSync, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import Store from 'electron-store'
 
+type ProviderId = 'gemini' | 'soniox'
+
 type Persisted = {
-  apiKeyEnc?: string // base64 of safeStorage-encrypted API key
+  apiKeyEnc?: string // base64 of safeStorage-encrypted Gemini API key
+  sonioxKeyEnc?: string // base64 of safeStorage-encrypted Soniox API key
+  provider: ProviderId
   sourceLang: string
   targetLang: string
   audioSourceId: string
+  echoTargetLanguage: boolean
   debugLogging: boolean
 }
 
@@ -18,6 +23,8 @@ const store = new Store<Persisted>({
     sourceLang: 'auto',
     targetLang: 'en',
     audioSourceId: '__system_audio__',
+    provider: 'gemini',
+    echoTargetLanguage: false,
     debugLogging: false
   }
 })
@@ -40,8 +47,12 @@ if (debugEnabled) {
   }
 }
 
-function getApiKey(): string {
-  const enc = store.get('apiKeyEnc')
+type SecretField = 'apiKeyEnc' | 'sonioxKeyEnc'
+
+// Provider keys are stored encrypted with the OS keychain (safeStorage) and only ever
+// decrypted here in the main process.
+function getSecret(field: SecretField): string {
+  const enc = store.get(field)
   if (!enc) return ''
   if (!safeStorage.isEncryptionAvailable()) return ''
   try {
@@ -51,16 +62,17 @@ function getApiKey(): string {
   }
 }
 
-function setApiKey(key: string): boolean {
+function setSecret(field: SecretField, key: string): boolean {
   if (!key) {
-    store.delete('apiKeyEnc')
+    store.delete(field)
     return true
   }
   if (!safeStorage.isEncryptionAvailable()) return false
-  const enc = safeStorage.encryptString(key).toString('base64')
-  store.set('apiKeyEnc', enc)
+  store.set(field, safeStorage.encryptString(key).toString('base64'))
   return true
 }
+
+const getApiKey = (): string => getSecret('apiKeyEnc')
 
 let mainWindow: BrowserWindow | null = null
 
@@ -387,6 +399,9 @@ ipcMain.handle('settings:setDebugLogging', (_e, enabled: boolean) => {
 // The API key itself never leaves the main process; the renderer only learns whether one exists.
 ipcMain.handle('settings:get', () => ({
   hasApiKey: !!getApiKey(),
+  hasSonioxKey: !!getSecret('sonioxKeyEnc'),
+  provider: store.get('provider'),
+  echoTargetLanguage: store.get('echoTargetLanguage'),
   sourceLang: store.get('sourceLang'),
   targetLang: store.get('targetLang'),
   audioSourceId: store.get('audioSourceId'),
@@ -395,7 +410,45 @@ ipcMain.handle('settings:get', () => ({
   platform: process.platform
 }))
 
-ipcMain.handle('settings:setApiKey', (_e, key: string) => setApiKey(String(key ?? '').trim()))
+ipcMain.handle('settings:setApiKey', (_e, key: string) => setSecret('apiKeyEnc', String(key ?? '').trim()))
+ipcMain.handle('settings:setSonioxKey', (_e, key: string) => setSecret('sonioxKeyEnc', String(key ?? '').trim()))
+
+// Soniox temporary key for one WebSocket connection, minted with the long-lived key that
+// stays here. Temporary keys start with snx_temp_ and are passed via the subprotocol list.
+const SONIOX_TEMP_KEY_URL = 'https://api.soniox.com/v1/auth/temporary-api-key'
+ipcMain.handle('soniox:createToken', async (): Promise<{ ok: true; token: string } | { ok: false; error: string }> => {
+  const apiKey = getSecret('sonioxKeyEnc')
+  if (!apiKey) return { ok: false, error: 'Enter your Soniox API key in Settings first.' }
+  try {
+    const res = await net.fetch(SONIOX_TEMP_KEY_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        usage_type: 'transcribe_websocket',
+        expires_in_seconds: 120,
+        single_use: true,
+        client_reference_id: 'live-trans'
+      })
+    })
+    const body = (await res.json().catch(() => ({}))) as {
+      api_key?: string
+      apiKey?: string
+      error_message?: string
+      message?: string
+    }
+    const token = body.api_key ?? body.apiKey
+    if (!res.ok || !token) {
+      const detail = body.error_message || body.message || `HTTP ${res.status}`
+      debugLog('soniox-token-error', { status: res.status, detail })
+      return { ok: false, error: `Could not create a Soniox session key: ${detail}` }
+    }
+    return { ok: true, token }
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err)
+    debugLog('soniox-token-network-error', { detail })
+    return { ok: false, error: `Could not reach Soniox: ${detail}` }
+  }
+})
 
 // Mint a short-lived Live API token for one WebSocket connection. Called for every connect
 // and reconnect, so a long session never outlives its token and the key stays here.
@@ -483,6 +536,8 @@ ipcMain.handle('settings:setPrefs', (_e, prefs: Partial<Persisted>) => {
   if (typeof prefs.sourceLang === 'string') store.set('sourceLang', prefs.sourceLang)
   if (typeof prefs.targetLang === 'string') store.set('targetLang', prefs.targetLang)
   if (typeof prefs.audioSourceId === 'string') store.set('audioSourceId', prefs.audioSourceId)
+  if (prefs.provider === 'gemini' || prefs.provider === 'soniox') store.set('provider', prefs.provider)
+  if (typeof prefs.echoTargetLanguage === 'boolean') store.set('echoTargetLanguage', prefs.echoTargetLanguage)
   return true
 })
 

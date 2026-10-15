@@ -1,8 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
-import { LANGUAGES, shortLabel } from './lib/languages'
+import { languagesFor, migrateLanguageCode, providerCode, shortLabel, type ProviderId } from './lib/languages'
 import { SystemAudioCapture } from './audio/capture'
 import { MicrophoneAudioCapture } from './audio/microphone'
-import { LiveTranslateClient } from './gemini/liveClient'
+import { GeminiProvider } from './providers/gemini'
+import { SonioxProvider } from './providers/soniox'
+import type { TranslationProvider } from './providers/types'
+import { PROVIDER_INFO, SettingsModal } from './components/SettingsModal'
 import { Segmenter, newSessionId, type Segment, type SessionRecord } from './lib/segments'
 import { Transcript } from './components/Transcript'
 import { ExportMenu } from './components/ExportMenu'
@@ -19,6 +22,15 @@ const AUTOSAVE_MS = 10_000
 
 type SessionMeta = Omit<SessionRecord, 'segments' | 'endedAt'>
 
+// Keep a language choice valid for a provider: an unsupported source falls back to
+// Auto-detect, an unsupported target to English.
+function fitLanguages(p: ProviderId, source: string, target: string): { source: string; target: string } {
+  return {
+    source: source === 'auto' || providerCode(p, source) ? source : 'auto',
+    target: providerCode(p, target) ? target : 'en'
+  }
+}
+
 const STATUS_LABEL: Record<Status, string> = {
   idle: 'Idle',
   connecting: 'Connecting',
@@ -27,9 +39,12 @@ const STATUS_LABEL: Record<Status, string> = {
 }
 
 export default function App(): React.JSX.Element {
-  // Only a new key being typed lives here; the saved key never leaves the main process.
-  const [apiKey, setApiKey] = useState('')
-  const [keySaved, setKeySaved] = useState(false)
+  // Whether a key is saved per provider; the keys themselves never leave the main process.
+  const [keys, setKeys] = useState<Record<ProviderId, boolean>>({ gemini: false, soniox: false })
+  const [provider, setProvider] = useState<ProviderId>('gemini')
+  const [echoTargetLanguage, setEchoTargetLanguage] = useState(false)
+  // Language the service detected in the source speech (when the source is Auto-detect).
+  const [detectedLang, setDetectedLang] = useState<string | null>(null)
   const [debugLogging, setDebugLogging] = useState(false)
   const [sourceLang, setSourceLang] = useState('auto')
   const [targetLang, setTargetLang] = useState('en')
@@ -49,7 +64,7 @@ export default function App(): React.JSX.Element {
 
   const systemCaptureRef = useRef<SystemAudioCapture | null>(null)
   const microphoneCaptureRef = useRef<MicrophoneAudioCapture | null>(null)
-  const clientRef = useRef<LiveTranslateClient | null>(null)
+  const clientRef = useRef<TranslationProvider | null>(null)
   const startingRef = useRef(false)
   // Incremented on every start/stop; callbacks from an older session check it and bail out.
   const sessionRef = useRef(0)
@@ -61,7 +76,10 @@ export default function App(): React.JSX.Element {
 
   const running = status === 'connecting' || status === 'listening'
   const targetName = shortLabel(targetLang)
-  const sourceName = sourceLang === 'auto' ? 'Auto-detect' : shortLabel(sourceLang)
+  const sourceName =
+    sourceLang === 'auto' ? (detectedLang ? `Auto-detect · ${shortLabel(detectedLang)}` : 'Auto-detect') : shortLabel(sourceLang)
+  const languages = languagesFor(provider)
+  const keySaved = keys[provider]
 
   // ---- initial load ----
   useEffect(() => {
@@ -87,13 +105,20 @@ export default function App(): React.JSX.Element {
         void window.api.debugLog('app.initial-load.settings', s)
         if (cancelled) return
 
-        setKeySaved(s.hasApiKey)
         setDebugLogging(s.debugLogging)
-        setSourceLang(s.sourceLang)
-        setTargetLang(s.targetLang)
+        const prov: ProviderId = s.provider === 'soniox' ? 'soniox' : 'gemini'
+        setProvider(prov)
+        setKeys({ gemini: s.hasApiKey, soniox: s.hasSonioxKey })
+        setEchoTargetLanguage(s.echoTargetLanguage)
+        const langs = fitLanguages(prov, migrateLanguageCode(s.sourceLang), migrateLanguageCode(s.targetLang))
+        setSourceLang(langs.source)
+        setTargetLang(langs.target)
+        if (langs.source !== s.sourceLang || langs.target !== s.targetLang) {
+          void window.api.setPrefs({ sourceLang: langs.source, targetLang: langs.target })
+        }
         setAudioSourceId(s.audioSourceId || SYSTEM_AUDIO_ID)
         setIsMac(s.platform === 'darwin')
-        if (s.hasApiKey) setShowSettings(false)
+        if (prov === 'soniox' ? s.hasSonioxKey : s.hasApiKey) setShowSettings(false)
 
         // Let Chromium's getUserMedia be the only microphone authorization path.
         // Prime it exactly once on macOS so device labels become available, then only
@@ -202,20 +227,35 @@ export default function App(): React.JSX.Element {
     }
   }
 
-  async function saveKey(): Promise<void> {
-    const key = apiKey.trim()
-    if (!key) return
-    const ok = await window.api.setApiKey(key)
-    setKeySaved(ok)
-    if (ok) setApiKey('')
-    setMessage(ok ? 'API key saved (encrypted).' : 'Could not save key — OS encryption unavailable.')
+  async function saveKey(p: ProviderId, key: string): Promise<boolean> {
+    const ok = await (p === 'soniox' ? window.api.setSonioxKey(key) : window.api.setApiKey(key))
+    if (ok) setKeys((k) => ({ ...k, [p]: true }))
+    setMessage(ok ? `${PROVIDER_INFO[p].keyLabel} saved (encrypted).` : 'Could not save key — OS encryption unavailable.')
+    return ok
   }
 
-  async function removeKey(): Promise<void> {
-    await window.api.setApiKey('')
-    setKeySaved(false)
-    setApiKey('')
-    setMessage('API key removed.')
+  async function removeKey(p: ProviderId): Promise<void> {
+    await (p === 'soniox' ? window.api.setSonioxKey('') : window.api.setApiKey(''))
+    setKeys((k) => ({ ...k, [p]: false }))
+    setMessage(`${PROVIDER_INFO[p].keyLabel} removed.`)
+  }
+
+  function onProviderChange(p: ProviderId): void {
+    if (running || startingRef.current || p === provider) return
+    setProvider(p)
+    // Keep the chosen languages where the new service supports them.
+    const langs = fitLanguages(p, sourceLang, targetLang)
+    setSourceLang(langs.source)
+    setTargetLang(langs.target)
+    void window.api.setPrefs({ provider: p, sourceLang: langs.source, targetLang: langs.target })
+    if (langs.target !== targetLang || langs.source !== sourceLang) {
+      setMessage(`${PROVIDER_INFO[p].short} does not support the previous language choice; it was reset.`)
+    }
+  }
+
+  function onEchoChange(v: boolean): void {
+    setEchoTargetLanguage(v)
+    void window.api.setPrefs({ echoTargetLanguage: v })
   }
 
   async function onDebugLoggingChange(enabled: boolean): Promise<void> {
@@ -254,7 +294,7 @@ export default function App(): React.JSX.Element {
     if (startingRef.current || running) return
     if (!keySaved) {
       setStatus('error')
-      setMessage('Enter your Gemini API key first.')
+      setMessage(`Enter your ${PROVIDER_INFO[provider].keyLabel} first.`)
       setShowSettings(true)
       return
     }
@@ -299,7 +339,8 @@ export default function App(): React.JSX.Element {
       if (!isCurrent()) return
     }
 
-    const client = new LiveTranslateClient()
+    setDetectedLang(null)
+    const client: TranslationProvider = provider === 'soniox' ? new SonioxProvider() : new GeminiProvider()
     const systemCapture = isSystem ? new SystemAudioCapture() : null
     const microphoneCapture = isSystem ? null : new MicrophoneAudioCapture()
     systemCaptureRef.current = systemCapture
@@ -317,7 +358,7 @@ export default function App(): React.JSX.Element {
     }
 
     client.connect(
-      { sourceLanguageCode: sourceLang, targetLanguageCode: targetLang },
+      { sourceLanguageCode: sourceLang, targetLanguageCode: targetLang, echoTargetLanguage },
       {
         onReady: async () => {
           if (!isCurrent()) return
@@ -358,7 +399,9 @@ export default function App(): React.JSX.Element {
         onTurnComplete: () => {
           if (isCurrent()) closeLine()
         },
-        onInterrupted: () => {},
+        onSourceLanguage: (code) => {
+          if (isCurrent()) setDetectedLang(code)
+        },
         onError: (m) => {
           if (isCurrent()) void teardown({ error: m })
         },
@@ -429,7 +472,7 @@ export default function App(): React.JSX.Element {
             <div className="leading-tight">
               <h1 className="text-[13px] font-semibold tracking-tight">live-trans</h1>
               <p className="text-[11px] text-faint">
-                Gemini 3.5 Live Translate · <span className="font-medium text-muted">{targetName}</span>
+                {PROVIDER_INFO[provider].name} · <span className="font-medium text-muted">{targetName}</span>
               </p>
             </div>
           </div>
@@ -485,7 +528,7 @@ export default function App(): React.JSX.Element {
 
       {/* ---- Control dock ---- */}
       <footer className="flex shrink-0 items-center justify-between gap-4 border-t border-border bg-surface/60 px-4 py-3">
-        <div className="flex items-center gap-3">
+        <div className="flex min-w-0 items-center gap-3">
           <button
             onClick={toggle}
             className={`flex h-10 shrink-0 items-center gap-2 whitespace-nowrap rounded-lg px-4 text-[13px] font-semibold transition active:scale-[0.98] ${
@@ -505,16 +548,16 @@ export default function App(): React.JSX.Element {
             )}
           </button>
 
-          <div className="flex items-center gap-2">
-            <Select value={sourceLang} onChange={onSourceLangChange}>
+          <div className="flex min-w-0 items-center gap-2">
+            <Select value={sourceLang} onChange={onSourceLangChange} className="w-56 min-w-0 shrink">
               <option value="auto">Auto-detect source</option>
-              {LANGUAGES.map((l) => <option key={l.code} value={l.code}>{l.label}</option>)}
+              {languages.map((l) => <option key={l.code} value={l.code}>{l.label}</option>)}
             </Select>
             <span className="text-faint">→</span>
-            <Select value={targetLang} onChange={onTargetChange}>
-              {LANGUAGES.map((l) => <option key={l.code} value={l.code}>{l.label}</option>)}
+            <Select value={targetLang} onChange={onTargetChange} className="w-56 min-w-0 shrink">
+              {languages.map((l) => <option key={l.code} value={l.code}>{l.label}</option>)}
             </Select>
-            <Select value={audioSourceId} onChange={onAudioSourceChange}>
+            <Select value={audioSourceId} onChange={onAudioSourceChange} className="w-40 min-w-0 shrink">
               <option value={SYSTEM_AUDIO_ID}>System audio</option>
               {audioDevices.map((d) => <option key={d.deviceId} value={d.deviceId}>🎤 {d.label}</option>)}
 
@@ -541,11 +584,14 @@ export default function App(): React.JSX.Element {
       {showSettings && (
         <SettingsModal
           onClose={() => setShowSettings(false)}
-          apiKey={apiKey}
-          setApiKey={setApiKey}
-          keySaved={keySaved}
-          saveKey={saveKey}
-          removeKey={removeKey}
+          provider={provider}
+          onProviderChange={onProviderChange}
+          providerLocked={running}
+          keys={keys}
+          onSaveKey={saveKey}
+          onRemoveKey={removeKey}
+          echoTargetLanguage={echoTargetLanguage}
+          onEchoChange={onEchoChange}
           debugLogging={debugLogging}
           onDebugLoggingChange={onDebugLoggingChange}
         />
@@ -590,145 +636,16 @@ function Meter({ level, active }: { level: number; active: boolean }): React.JSX
 }
 
 
-/* =========================== Settings modal =========================== */
-
-function SettingsModal(props: {
-  onClose: () => void
-  apiKey: string
-  setApiKey: (v: string) => void
-  keySaved: boolean
-  saveKey: () => void
-  removeKey: () => void
-  debugLogging: boolean
-  onDebugLoggingChange: (v: boolean) => void
-}): React.JSX.Element {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') props.onClose()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [props])
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex animate-fade-in items-center justify-center bg-black/55 p-6 backdrop-blur-sm"
-      onClick={props.onClose}
-    >
-      <div
-        className="no-drag flex max-h-[88vh] w-full max-w-lg animate-pop-in flex-col overflow-hidden rounded-2xl border border-border-strong bg-surface shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* Modal header */}
-        <div className="flex items-center justify-between border-b border-border px-5 py-4">
-          <div>
-            <h2 className="text-sm font-semibold">Settings</h2>
-            <p className="text-[11px] text-muted">Configure your translation session</p>
-          </div>
-          <button
-            onClick={props.onClose}
-            className="grid h-7 w-7 place-items-center rounded-lg text-muted transition hover:bg-elevated hover:text-foreground"
-          >
-            <CloseIcon />
-          </button>
-        </div>
-
-        {/* Modal body */}
-        <div className="flex-1 space-y-5 overflow-y-auto px-5 py-5">
-          <Field
-            label="Gemini API key"
-            hint={
-              props.keySaved
-                ? 'A key is saved, encrypted via the OS keychain. It stays in the app\'s main process; sessions use short-lived tokens.'
-                : 'Stored encrypted on this device via the OS keychain.'
-            }
-          >
-            <div className="flex gap-2">
-              <input
-                type="password"
-                value={props.apiKey}
-                onChange={(e) => props.setApiKey(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') props.saveKey()
-                }}
-                placeholder={props.keySaved ? '•••••••• saved — paste a new key to replace' : 'AIza…'}
-                className="flex-1 rounded-lg border border-border bg-background px-3 py-2 text-sm outline-none transition focus:border-accent"
-              />
-              <button
-                onClick={props.saveKey}
-                disabled={!props.apiKey.trim()}
-                className="rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-accent-fg transition hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                {props.keySaved ? 'Replace' : 'Save'}
-              </button>
-              {props.keySaved && (
-                <button
-                  onClick={props.removeKey}
-                  className="rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm text-muted transition hover:bg-elevated hover:text-red-300"
-                >
-                  Remove
-                </button>
-              )}
-            </div>
-          </Field>
-
-          <Field label="Diagnostics">
-            <Toggle
-              checked={props.debugLogging}
-              onChange={props.onDebugLoggingChange}
-              title="Debug logging"
-              desc="Writes a detailed log for troubleshooting. Verbose Chromium logging applies after a restart."
-            />
-            {props.debugLogging && (
-              <button
-                onClick={() => void window.api.openDebugLogFolder()}
-                className="mt-1 px-3 text-[11px] text-accent hover:underline"
-              >
-                Open log folder
-              </button>
-            )}
-          </Field>
-        </div>
-
-        {/* Modal footer */}
-        <div className="flex justify-end border-t border-border px-5 py-3">
-          <button
-            onClick={props.onClose}
-            className="rounded-lg border border-border bg-surface-2 px-4 py-2 text-sm font-medium text-foreground transition hover:bg-elevated"
-          >
-            Done
-          </button>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-/* =========================== Settings primitives =========================== */
-
-function Field(props: {
-  label: string
-  hint?: string
-  children: React.ReactNode
-}): React.JSX.Element {
-  return (
-    <div>
-      <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-[0.06em] text-muted">
-        {props.label}
-      </label>
-      {props.children}
-      {props.hint && <p className="mt-1.5 text-[11px] text-faint">{props.hint}</p>}
-    </div>
-  )
-}
+/* =========================== Controls =========================== */
 
 function Select(props: {
   value: string
   onChange: (v: string) => void
   children: React.ReactNode
+  className?: string
 }): React.JSX.Element {
   return (
-    <div className="relative">
+    <div className={`relative ${props.className ?? ''}`}>
       <select
         value={props.value}
         onChange={(e) => props.onChange(e.target.value)}
@@ -740,37 +657,6 @@ function Select(props: {
         <ChevronIcon />
       </span>
     </div>
-  )
-}
-
-function Toggle(props: {
-  checked: boolean
-  onChange: (v: boolean) => void
-  title: string
-  desc: string
-}): React.JSX.Element {
-  return (
-    <button
-      type="button"
-      onClick={() => props.onChange(!props.checked)}
-      className="flex w-full items-center justify-between gap-4 rounded-lg px-3 py-2.5 text-left transition hover:bg-surface-2"
-    >
-      <span>
-        <span className="block text-[13px] font-medium text-foreground">{props.title}</span>
-        <span className="block text-[11px] text-faint">{props.desc}</span>
-      </span>
-      <span
-        className={`relative h-5.5 w-9.5 shrink-0 rounded-full transition-colors ${
-          props.checked ? 'bg-accent' : 'bg-border-strong'
-        }`}
-      >
-        <span
-          className={`absolute top-0.5 h-4.5 w-4.5 rounded-full bg-white shadow transition-transform ${
-            props.checked ? 'translate-x-4.5' : 'translate-x-0.5'
-          }`}
-        />
-      </span>
-    </button>
   )
 }
 
@@ -828,13 +714,6 @@ function StopIcon(): React.JSX.Element {
   )
 }
 
-function CloseIcon(): React.JSX.Element {
-  return (
-    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M18 6 6 18M6 6l12 12" />
-    </svg>
-  )
-}
 
 function ChevronIcon(): React.JSX.Element {
   return (

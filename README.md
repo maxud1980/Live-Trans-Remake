@@ -19,6 +19,8 @@ Please see the original repository for the original project's description, docum
 
 The main changes in this remake:
 
+- **Two translation services** — Gemini 3.5 Live Translate or Soniox real-time translation, switchable in Settings.
+- **Paired transcript, history and export** — each line next to its translation; sessions saved automatically; export to .txt.
 - **Subtitles-only workflow** — translated audio playback was removed. The app displays the original and translated speech as text.
 - **Microphone input** — translation can use a selected microphone/input device as well as system audio.
 - **Windows support** — added native WASAPI process-loopback capture.

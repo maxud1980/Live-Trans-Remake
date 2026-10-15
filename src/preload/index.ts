@@ -1,7 +1,12 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
+export type ProviderId = 'gemini' | 'soniox'
+
 export type AppSettings = {
   hasApiKey: boolean
+  hasSonioxKey: boolean
+  provider: ProviderId
+  echoTargetLanguage: boolean
   sourceLang: string
   targetLang: string
   audioSourceId: string
@@ -46,9 +51,14 @@ const api = {
     sourceLang?: string
     targetLang?: string
     audioSourceId?: string
+    provider?: ProviderId
+    echoTargetLanguage?: boolean
   }): Promise<boolean> => ipcRenderer.invoke('settings:setPrefs', prefs),
   // Short-lived Live API token minted by the main process; the API key never enters the renderer.
   createLiveToken: (): Promise<LiveTokenResult> => ipcRenderer.invoke('live:createToken'),
+  setSonioxKey: (key: string): Promise<boolean> => ipcRenderer.invoke('settings:setSonioxKey', key),
+  // Soniox temporary key (snx_temp_…), minted by the main process from the stored key.
+  createSonioxToken: (): Promise<LiveTokenResult> => ipcRenderer.invoke('soniox:createToken'),
   // Session history (JSON files in userData/history) and plain-text export.
   saveHistory: (record: HistoryRecord): Promise<boolean> => ipcRenderer.invoke('history:save', record),
   listHistory: (): Promise<HistorySummary[]> => ipcRenderer.invoke('history:list'),

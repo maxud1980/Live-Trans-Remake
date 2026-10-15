@@ -1,7 +1,12 @@
 /// <reference types="vite/client" />
 
+export type ProviderId = 'gemini' | 'soniox'
+
 export type AppSettings = {
   hasApiKey: boolean
+  hasSonioxKey: boolean
+  provider: ProviderId
+  echoTargetLanguage: boolean
   sourceLang: string
   targetLang: string
   audioSourceId: string
@@ -36,8 +41,12 @@ export interface PreloadApi {
     sourceLang?: string
     targetLang?: string
     audioSourceId?: string
+    provider?: ProviderId
+    echoTargetLanguage?: boolean
   }) => Promise<boolean>
   createLiveToken: () => Promise<LiveTokenResult>
+  setSonioxKey: (key: string) => Promise<boolean>
+  createSonioxToken: () => Promise<LiveTokenResult>
   saveHistory: (record: HistoryRecord) => Promise<boolean>
   listHistory: () => Promise<HistorySummary[]>
   getHistory: (id: string) => Promise<HistoryRecord | null>
