@@ -2,17 +2,21 @@
 
 export type AppSettings = {
   hasApiKey: boolean
-  apiKey: string
   sourceLang: string
   targetLang: string
   audioSourceId: string
+  debugLogging: boolean
   encryptionAvailable: boolean
   platform: string
 }
 
+export type LiveTokenResult = { ok: true; token: string } | { ok: false; error: string }
+
 export interface PreloadApi {
   debugLog: (event: string, data?: unknown) => Promise<boolean>
   getDebugLogPath: () => Promise<string>
+  openDebugLogFolder: () => Promise<string>
+  setDebugLogging: (enabled: boolean) => Promise<boolean>
   getSettings: () => Promise<AppSettings>
   setApiKey: (key: string) => Promise<boolean>
   setPrefs: (prefs: {
@@ -20,6 +24,7 @@ export interface PreloadApi {
     targetLang?: string
     audioSourceId?: string
   }) => Promise<boolean>
+  createLiveToken: () => Promise<LiveTokenResult>
   microphonePermissionStatus: () => Promise<string>
   requestMicrophonePermission: () => Promise<boolean>
   openMicrophoneSettings: () => Promise<void>

@@ -1,9 +1,9 @@
 {
   "name": "live-trans",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "description": "Real-time desktop translator for system audio, powered by Gemini 3.5 Live Translate",
   "main": "out/main/index.js",
-  "author": "minhnhat165",
+  "author": "maxud1980 (remake of Live Trans by minhnhat165)",
   "license": "SEE LICENSE IN LICENSE",
   "scripts": {
     "dev": "electron-vite dev",

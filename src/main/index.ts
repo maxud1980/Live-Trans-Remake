@@ -1,35 +1,43 @@
-import { app, BrowserWindow, ipcMain, safeStorage, shell, session, systemPreferences } from 'electron'
+import { app, BrowserWindow, ipcMain, net, safeStorage, shell, session, systemPreferences } from 'electron'
 import { join, dirname } from 'node:path'
 import { appendFileSync, existsSync, mkdirSync } from 'node:fs'
 import { spawn, execSync, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import Store from 'electron-store'
-
-// Chromium/native diagnostic logging. Keep enabled for this troubleshooting build so we can
-// see media/WebRTC activity that never reaches Electron's JS permission handlers.
-const chromiumDebugLogPath = join(app.getPath('userData'), 'chromium-debug.log')
-try {
-  mkdirSync(dirname(chromiumDebugLogPath), { recursive: true })
-  app.commandLine.appendSwitch('enable-logging', 'file')
-  app.commandLine.appendSwitch('log-file', chromiumDebugLogPath)
-  app.commandLine.appendSwitch('v', '1')
-} catch {
-  // Diagnostic logging must never prevent the app from starting.
-}
 
 type Persisted = {
   apiKeyEnc?: string // base64 of safeStorage-encrypted API key
   sourceLang: string
   targetLang: string
   audioSourceId: string
+  debugLogging: boolean
 }
 
 const store = new Store<Persisted>({
   defaults: {
     sourceLang: 'auto',
     targetLang: 'en',
-    audioSourceId: '__system_audio__'
+    audioSourceId: '__system_audio__',
+    debugLogging: false
   }
 })
+
+// Diagnostic logging is opt-in (Settings → Debug logging). It used to be always on, which
+// grew the log files without bound and pushed every transcript fragment through IPC.
+let debugEnabled = store.get('debugLogging')
+
+// Verbose Chromium/native logging can only be configured before the app is ready, so this
+// part of the setting takes effect on the next launch.
+const chromiumDebugLogPath = join(app.getPath('userData'), 'chromium-debug.log')
+if (debugEnabled) {
+  try {
+    mkdirSync(dirname(chromiumDebugLogPath), { recursive: true })
+    app.commandLine.appendSwitch('enable-logging', 'file')
+    app.commandLine.appendSwitch('log-file', chromiumDebugLogPath)
+    app.commandLine.appendSwitch('v', '1')
+  } catch {
+    // Diagnostic logging must never prevent the app from starting.
+  }
+}
 
 function getApiKey(): string {
   const enc = store.get('apiKeyEnc')
@@ -59,6 +67,7 @@ let mainWindow: BrowserWindow | null = null
 // Never log API keys or raw audio payloads.
 const debugLogPath = join(app.getPath('userData'), 'live-trans-debug.log')
 function debugLog(event: string, data?: unknown): void {
+  if (!debugEnabled) return
   const timestamp = new Date().toISOString()
   let suffix = ''
   if (data !== undefined) {
@@ -99,7 +108,10 @@ function createWindow(): void {
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
-      sandbox: false
+      // The renderer only talks to the OS through the preload bridge, so it can run sandboxed.
+      sandbox: true,
+      contextIsolation: true,
+      nodeIntegration: false
     }
   })
 
@@ -344,7 +356,10 @@ ipcMain.handle('capture:start', () => {
 
 ipcMain.handle('capture:stop', () => {
   debugLog('capture-stop-ipc')
-  stopCapture()
+  // macOS keeps the Core Audio tap alive between sessions so TCC does not prompt again.
+  // Windows has no such constraint, so the WASAPI helper is terminated instead of idling.
+  if (process.platform === 'win32') disposeCaptureProcess()
+  else stopCapture()
   return true
 })
 
@@ -352,26 +367,65 @@ app.on('before-quit', () => { debugLog('before-quit'); disposeCaptureProcess() }
 
 // ---- IPC ----
 ipcMain.handle('debug:getPath', () => debugLogPath)
+ipcMain.handle('debug:enabled', () => debugEnabled)
 
 ipcMain.handle('debug:log', (_e, event: string, data?: unknown) => {
-  debugLog(
-    `renderer:${String(event)}`,
-    data
-  )
+  debugLog(`renderer:${String(event)}`, data)
   return true
 })
 
+ipcMain.handle('debug:openFolder', () => shell.openPath(dirname(debugLogPath)))
+
+ipcMain.handle('settings:setDebugLogging', (_e, enabled: boolean) => {
+  debugEnabled = !!enabled
+  store.set('debugLogging', debugEnabled)
+  if (debugEnabled) debugLog('debug-logging-enabled', { appVersion: app.getVersion(), platform: process.platform })
+  return debugEnabled
+})
+
+// The API key itself never leaves the main process; the renderer only learns whether one exists.
 ipcMain.handle('settings:get', () => ({
-  hasApiKey: !!store.get('apiKeyEnc'),
-  apiKey: getApiKey(),
+  hasApiKey: !!getApiKey(),
   sourceLang: store.get('sourceLang'),
   targetLang: store.get('targetLang'),
   audioSourceId: store.get('audioSourceId'),
+  debugLogging: debugEnabled,
   encryptionAvailable: safeStorage.isEncryptionAvailable(),
   platform: process.platform
 }))
 
-ipcMain.handle('settings:setApiKey', (_e, key: string) => setApiKey(key))
+ipcMain.handle('settings:setApiKey', (_e, key: string) => setApiKey(String(key ?? '').trim()))
+
+// Mint a short-lived Live API token for one WebSocket connection. Called for every connect
+// and reconnect, so a long session never outlives its token and the key stays here.
+const AUTH_TOKENS_URL = 'https://generativelanguage.googleapis.com/v1beta/auth_tokens'
+ipcMain.handle('live:createToken', async (): Promise<{ ok: true; token: string } | { ok: false; error: string }> => {
+  const apiKey = getApiKey()
+  if (!apiKey) return { ok: false, error: 'Enter your Gemini API key in Settings first.' }
+  const now = Date.now()
+  try {
+    const res = await net.fetch(AUTH_TOKENS_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
+      body: JSON.stringify({
+        uses: 1,
+        expireTime: new Date(now + 30 * 60_000).toISOString(),
+        newSessionExpireTime: new Date(now + 2 * 60_000).toISOString()
+      })
+    })
+    const body = (await res.json().catch(() => ({}))) as { name?: string; error?: { message?: string } }
+    if (!res.ok || !body.name) {
+      const detail = body.error?.message || `HTTP ${res.status}`
+      debugLog('live-token-error', { status: res.status, detail })
+      return { ok: false, error: `Could not create a session token: ${detail}` }
+    }
+    return { ok: true, token: body.name }
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err)
+    debugLog('live-token-network-error', { detail })
+    return { ok: false, error: `Could not reach the Gemini API: ${detail}` }
+  }
+})
 
 ipcMain.handle('perm:microphoneStatus', () => {
   if (process.platform !== 'darwin') {

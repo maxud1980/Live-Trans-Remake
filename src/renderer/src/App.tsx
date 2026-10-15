@@ -24,8 +24,10 @@ const STATUS_LABEL: Record<Status, string> = {
 }
 
 export default function App(): React.JSX.Element {
+  // Only a new key being typed lives here; the saved key never leaves the main process.
   const [apiKey, setApiKey] = useState('')
   const [keySaved, setKeySaved] = useState(false)
+  const [debugLogging, setDebugLogging] = useState(false)
   const [sourceLang, setSourceLang] = useState('auto')
   const [targetLang, setTargetLang] = useState('en')
   const [audioSourceId, setAudioSourceId] = useState(SYSTEM_AUDIO_ID)
@@ -47,6 +49,8 @@ export default function App(): React.JSX.Element {
   const microphoneCaptureRef = useRef<MicrophoneAudioCapture | null>(null)
   const clientRef = useRef<LiveTranslateClient | null>(null)
   const startingRef = useRef(false)
+  // Incremented on every start/stop; callbacks from an older session check it and bail out.
+  const sessionRef = useRef(0)
   const microphonePrimeRef = useRef<Promise<boolean> | null>(null)
   const origRef = useRef<HTMLDivElement | null>(null)
   const transRef = useRef<HTMLDivElement | null>(null)
@@ -76,11 +80,11 @@ export default function App(): React.JSX.Element {
       try {
         void window.api.debugLog('app.initial-load.begin')
         const s = await window.api.getSettings()
-        void window.api.debugLog('app.initial-load.settings', { ...s, apiKey: s.apiKey ? '<present>' : '' })
+        void window.api.debugLog('app.initial-load.settings', s)
         if (cancelled) return
 
-        setApiKey(s.apiKey)
         setKeySaved(s.hasApiKey)
+        setDebugLogging(s.debugLogging)
         setSourceLang(s.sourceLang)
         setTargetLang(s.targetLang)
         setAudioSourceId(s.audioSourceId || SYSTEM_AUDIO_ID)
@@ -172,134 +176,159 @@ export default function App(): React.JSX.Element {
   }
 
   async function saveKey(): Promise<void> {
-    const ok = await window.api.setApiKey(apiKey.trim())
-    setKeySaved(ok && !!apiKey.trim())
+    const key = apiKey.trim()
+    if (!key) return
+    const ok = await window.api.setApiKey(key)
+    setKeySaved(ok)
+    if (ok) setApiKey('')
     setMessage(ok ? 'API key saved (encrypted).' : 'Could not save key — OS encryption unavailable.')
   }
 
-  async function start(): Promise<void> {
-    void window.api.debugLog('app.start.called', { starting: startingRef.current, running, audioSourceId, apiKeyPresent: !!apiKey.trim() })
-    if (startingRef.current || running) {
-      void window.api.debugLog('app.start.ignored', { reason: startingRef.current ? 'already-starting' : 'already-running' })
-      return
+  async function removeKey(): Promise<void> {
+    await window.api.setApiKey('')
+    setKeySaved(false)
+    setApiKey('')
+    setMessage('API key removed.')
+  }
+
+  async function onDebugLoggingChange(enabled: boolean): Promise<void> {
+    setDebugLogging(await window.api.setDebugLogging(enabled))
+  }
+
+  // The single exit path for a session: stops capture, closes the socket and settles the UI.
+  // Every failure branch (capture, API error, connection loss) ends here, so a broken session
+  // can never keep a WebSocket open in the background.
+  async function teardown(outcome: { error?: string; message?: string } = {}): Promise<void> {
+    sessionRef.current++
+    startingRef.current = false
+    const systemCapture = systemCaptureRef.current
+    const microphoneCapture = microphoneCaptureRef.current
+    const client = clientRef.current
+    systemCaptureRef.current = null
+    microphoneCaptureRef.current = null
+    clientRef.current = null
+    client?.close()
+    await systemCapture?.stop()
+    await microphoneCapture?.stop()
+    setLevel(0)
+    if (outcome.error) {
+      setStatus('error')
+      setMessage(outcome.error)
+    } else {
+      setStatus('idle')
+      setMessage(outcome.message ?? 'Stopped.')
     }
-    startingRef.current = true
-    if (!apiKey.trim()) {
+  }
+
+  async function start(): Promise<void> {
+    if (startingRef.current || running) return
+    if (!keySaved) {
       setStatus('error')
       setMessage('Enter your Gemini API key first.')
       setShowSettings(true)
-      startingRef.current = false
       return
     }
+    startingRef.current = true
+    const session = ++sessionRef.current
+    const isCurrent = (): boolean => sessionRef.current === session
+    const isSystem = audioSourceId === SYSTEM_AUDIO_ID
+
     setStatus('connecting')
-    setMessage(audioSourceId === SYSTEM_AUDIO_ID ? 'Connecting — preparing system audio…' : 'Connecting — preparing microphone…')
+    setMessage(isSystem ? 'Connecting — preparing system audio…' : 'Connecting — preparing microphone…')
     setOriginal('')
     setTranslated('')
-    void window.api.debugLog('app.start.session-begin', { audioSourceId, sourceLang, targetLang })
+    void window.api.debugLog('app.start', { audioSourceId, sourceLang, targetLang })
 
     // Permissions are requested once when the app starts. A translation session
     // only checks the already-granted microphone state and never asks macOS again.
-    if (audioSourceId !== SYSTEM_AUDIO_ID) {
+    if (!isSystem) {
       const microphoneStatus = await window.api.microphonePermissionStatus()
-      void window.api.debugLog('app.start.microphone-status', { microphoneStatus })
+      if (!isCurrent()) return
       if (microphoneStatus !== 'granted') {
         void window.api.debugLog('app.start.microphone-not-granted', { microphoneStatus })
-        setStatus('error')
-        setMessage('Microphone permission is not enabled. Opening System Settings → Privacy & Security → Microphone — enable live-trans there, then restart the app.')
         void window.api.openMicrophoneSettings()
-        startingRef.current = false
+        await teardown({
+          error:
+            'Microphone permission is not enabled. Opening System Settings → Privacy & Security → Microphone — enable live-trans there, then restart the app.'
+        })
         return
       }
       await refreshDevices()
+      if (!isCurrent()) return
     }
 
-    void window.api.debugLog('app.start.create-capture', { audioSourceId, isSystemAudio: audioSourceId === SYSTEM_AUDIO_ID })
     const client = new LiveTranslateClient()
-    const systemCapture = audioSourceId === SYSTEM_AUDIO_ID ? new SystemAudioCapture() : null
-    const microphoneCapture = audioSourceId === SYSTEM_AUDIO_ID ? null : new MicrophoneAudioCapture()
+    const systemCapture = isSystem ? new SystemAudioCapture() : null
+    const microphoneCapture = isSystem ? null : new MicrophoneAudioCapture()
     systemCaptureRef.current = systemCapture
     microphoneCaptureRef.current = microphoneCapture
     clientRef.current = client
 
-    const handlers = {
+    const captureHandlers = {
       onChunk: (b64: string) => client.sendAudioChunk(b64),
-      onLevel: (rms: number) => setLevel(rms),
+      onLevel: (rms: number) => {
+        if (isCurrent()) setLevel(rms)
+      },
       onError: (m: string) => {
-        void window.api.debugLog('capture.handler.error', { message: m })
-        setStatus('error')
-        setMessage(`Capture error: ${m}`)
+        if (isCurrent()) void teardown({ error: `Capture error: ${m}` })
       }
     }
 
-    void window.api.debugLog('gemini.connect.call')
     client.connect(
-      { apiKey: apiKey.trim(), sourceLanguageCode: sourceLang, targetLanguageCode: targetLang },
+      { sourceLanguageCode: sourceLang, targetLanguageCode: targetLang },
       {
         onReady: async () => {
-          void window.api.debugLog('gemini.onReady', { audioSourceId })
-          setMessage(audioSourceId === SYSTEM_AUDIO_ID ? 'Connected — capturing system audio…' : 'Connected — capturing microphone…')
+          if (!isCurrent()) return
+          setMessage(isSystem ? 'Connected — capturing system audio…' : 'Connected — capturing microphone…')
           try {
-            if (systemCapture) {
-              void window.api.debugLog('system-capture.start')
-              await systemCapture.start(handlers)
-              void window.api.debugLog('system-capture.start.success')
-            } else {
-              void window.api.debugLog('microphone-capture.start.call', { audioSourceId })
-              await microphoneCapture?.start(audioSourceId, handlers)
-              void window.api.debugLog('microphone-capture.start.returned')
-            }
-            setStatus('listening')
-            setMessage(audioSourceId === SYSTEM_AUDIO_ID ? 'Listening to system audio.' : 'Listening to microphone.')
-            startingRef.current = false
-          } catch (err) {
-            void window.api.debugLog('capture.start.error', { error: err instanceof Error ? { name: err.name, message: err.message, stack: err.stack } : String(err) })
-            startingRef.current = false
-            /* capture.start already reported the error */
+            if (systemCapture) await systemCapture.start(captureHandlers)
+            else await microphoneCapture?.start(audioSourceId, captureHandlers)
+          } catch {
+            // start() already reported through captureHandlers.onError → teardown.
+            return
           }
+          if (!isCurrent()) return
+          startingRef.current = false
+          setStatus('listening')
+          setMessage(isSystem ? 'Listening to system audio.' : 'Listening to microphone.')
         },
-        onReconnecting: (attempt, delayMs) => {
-          void window.api.debugLog('gemini.onReconnecting', { attempt, delayMs })
-          setStatus((s) => (s === 'error' ? s : 'connecting'))
+        onReconnecting: (attempt) => {
+          if (!isCurrent()) return
+          setStatus('connecting')
           setMessage(attempt === 0 ? 'Session rotating — reconnecting…' : `Connection dropped — reconnecting (attempt ${attempt})…`)
         },
         onReconnected: () => {
-          void window.api.debugLog('gemini.onReconnected')
-          setStatus((s) => (s === 'error' ? s : 'listening'))
+          if (!isCurrent()) return
+          setStatus('listening')
           setMessage('Reconnected — resuming translation.')
         },
-        onInputTranscript: (t) => { void window.api.debugLog('gemini.input-transcript', { length: t.length }); setOriginal((p) => appendCapped(p, t)) },
-        onOutputTranscript: (t) => { void window.api.debugLog('gemini.output-transcript', { length: t.length }); setTranslated((p) => appendCapped(p, t)) },
+        onInputTranscript: (t) => {
+          if (isCurrent()) setOriginal((p) => appendCapped(p, t))
+        },
+        onOutputTranscript: (t) => {
+          if (isCurrent()) setTranslated((p) => appendCapped(p, t))
+        },
         onTurnComplete: () => {
+          if (!isCurrent()) return
           setOriginal((p) => (p.endsWith('\n') ? p : p + '\n'))
           setTranslated((p) => (p.endsWith('\n') ? p : p + '\n'))
         },
         onInterrupted: () => {},
         onError: (m) => {
-          void window.api.debugLog('gemini.handler.error', { message: m })
-          setStatus('error')
-          setMessage(m)
+          if (isCurrent()) void teardown({ error: m })
         },
         onClose: ({ code, reason }) => {
-          void window.api.debugLog('gemini.onClose', { code, reason })
-          startingRef.current = false
-          setStatus((s) => (s === 'error' ? s : 'idle'))
-          setMessage(reason ? `Disconnected (${code}): ${reason}` : `Disconnected (${code}).`)
+          if (!isCurrent()) return
+          const text = reason ? `Disconnected (${code}): ${reason}` : `Disconnected (${code}).`
+          void teardown({ error: text })
         }
       }
     )
   }
 
   async function stop(): Promise<void> {
-    void window.api.debugLog('app.stop.called', { audioSourceId, status })
-    await systemCaptureRef.current?.stop()
-    await microphoneCaptureRef.current?.stop()
-    clientRef.current?.close()
-    systemCaptureRef.current = null
-    microphoneCaptureRef.current = null
-    clientRef.current = null
-    setStatus('idle')
-    setLevel(0)
-    setMessage('Stopped.')
+    void window.api.debugLog('app.stop', { audioSourceId, status })
+    await teardown({ message: 'Stopped.' })
   }
 
   function toggle(): void {
@@ -453,6 +482,9 @@ export default function App(): React.JSX.Element {
           setApiKey={setApiKey}
           keySaved={keySaved}
           saveKey={saveKey}
+          removeKey={removeKey}
+          debugLogging={debugLogging}
+          onDebugLoggingChange={onDebugLoggingChange}
         />
       )}
 
@@ -547,6 +579,9 @@ function SettingsModal(props: {
   setApiKey: (v: string) => void
   keySaved: boolean
   saveKey: () => void
+  removeKey: () => void
+  debugLogging: boolean
+  onDebugLoggingChange: (v: boolean) => void
 }): React.JSX.Element {
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
@@ -581,24 +616,59 @@ function SettingsModal(props: {
 
         {/* Modal body */}
         <div className="flex-1 space-y-5 overflow-y-auto px-5 py-5">
-          <Field label="Gemini API key" hint="Stored encrypted on this device via the OS keychain.">
+          <Field
+            label="Gemini API key"
+            hint={
+              props.keySaved
+                ? 'A key is saved, encrypted via the OS keychain. It stays in the app\'s main process; sessions use short-lived tokens.'
+                : 'Stored encrypted on this device via the OS keychain.'
+            }
+          >
             <div className="flex gap-2">
               <input
                 type="password"
                 value={props.apiKey}
                 onChange={(e) => props.setApiKey(e.target.value)}
-                placeholder="AIza…"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') props.saveKey()
+                }}
+                placeholder={props.keySaved ? '•••••••• saved — paste a new key to replace' : 'AIza…'}
                 className="flex-1 rounded-lg border border-border bg-background px-3 py-2 text-sm outline-none transition focus:border-accent"
               />
               <button
                 onClick={props.saveKey}
-                className="rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-accent-fg transition hover:bg-accent-hover"
+                disabled={!props.apiKey.trim()}
+                className="rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-accent-fg transition hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-40"
               >
-                {props.keySaved ? 'Update' : 'Save'}
+                {props.keySaved ? 'Replace' : 'Save'}
               </button>
+              {props.keySaved && (
+                <button
+                  onClick={props.removeKey}
+                  className="rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm text-muted transition hover:bg-elevated hover:text-red-300"
+                >
+                  Remove
+                </button>
+              )}
             </div>
           </Field>
 
+          <Field label="Diagnostics">
+            <Toggle
+              checked={props.debugLogging}
+              onChange={props.onDebugLoggingChange}
+              title="Debug logging"
+              desc="Writes a detailed log for troubleshooting. Verbose Chromium logging applies after a restart."
+            />
+            {props.debugLogging && (
+              <button
+                onClick={() => void window.api.openDebugLogFolder()}
+                className="mt-1 px-3 text-[11px] text-accent hover:underline"
+              >
+                Open log folder
+              </button>
+            )}
+          </Field>
         </div>
 
         {/* Modal footer */}

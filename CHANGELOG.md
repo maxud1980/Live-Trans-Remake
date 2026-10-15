@@ -1,3 +1,18 @@
+## [0.1.13] — 2026-10-15
+
+### Fixed
+- A failed capture start, an API error or a dropped connection no longer leaves the Gemini session open in the background. Every failure path now goes through one teardown that stops capture and closes the socket.
+- Audio captured while the session reconnects (goAway rotation or network loss) is buffered (up to 3 s) and sent once the new session is ready, instead of being dropped.
+- A session that never became ready (wrong key, no model access) now fails immediately with the server's reason instead of retrying 8 times.
+- Windows: the WASAPI capture helper is terminated on Stop instead of running until the app quits.
+
+### Changed
+- The Gemini API key never leaves the main process. Each connection uses a short-lived ephemeral token (v1beta `auth_tokens`, Live API `BidiGenerateContentConstrained` endpoint).
+- The renderer now runs sandboxed (`sandbox: true`, `contextIsolation: true`).
+- Debug logging is off by default and can be enabled in Settings → Diagnostics; per-fragment transcript logging was removed.
+- Microphone capture uses an AudioWorklet instead of the deprecated ScriptProcessorNode.
+- Settings: the saved key is no longer shown; it can be replaced or removed.
+
 ## [0.1.12] — 2026-10-12
 
 ### Fixed
