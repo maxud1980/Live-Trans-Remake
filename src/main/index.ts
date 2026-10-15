@@ -1,38 +1,64 @@
-import { app, BrowserWindow, ipcMain, safeStorage, shell, session, systemPreferences } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, net, safeStorage, shell, session, systemPreferences } from 'electron'
 import { join, dirname } from 'node:path'
 import { appendFileSync, existsSync, mkdirSync } from 'node:fs'
+import { readdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { spawn, execSync, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import Store from 'electron-store'
+import { OVERLAY_DEFAULTS, OverlayController, type OverlaySettings } from './overlay'
+import { AppTray } from './tray'
+import { mainText, resolveUiLanguage, type MainStringKey, type UiLanguage } from './strings'
 
-// Chromium/native diagnostic logging. Keep enabled for this troubleshooting build so we can
-// see media/WebRTC activity that never reaches Electron's JS permission handlers.
-const chromiumDebugLogPath = join(app.getPath('userData'), 'chromium-debug.log')
-try {
-  mkdirSync(dirname(chromiumDebugLogPath), { recursive: true })
-  app.commandLine.appendSwitch('enable-logging', 'file')
-  app.commandLine.appendSwitch('log-file', chromiumDebugLogPath)
-  app.commandLine.appendSwitch('v', '1')
-} catch {
-  // Diagnostic logging must never prevent the app from starting.
-}
+type ProviderId = 'gemini' | 'soniox'
 
 type Persisted = {
-  apiKeyEnc?: string // base64 of safeStorage-encrypted API key
+  apiKeyEnc?: string // base64 of safeStorage-encrypted Gemini API key
+  sonioxKeyEnc?: string // base64 of safeStorage-encrypted Soniox API key
+  provider: ProviderId
   sourceLang: string
   targetLang: string
   audioSourceId: string
+  echoTargetLanguage: boolean
+  debugLogging: boolean
+  uiLanguage?: UiLanguage
+  overlay: OverlaySettings
 }
 
 const store = new Store<Persisted>({
   defaults: {
     sourceLang: 'auto',
     targetLang: 'en',
-    audioSourceId: '__system_audio__'
+    audioSourceId: '__system_audio__',
+    provider: 'gemini',
+    echoTargetLanguage: false,
+    debugLogging: false,
+    overlay: OVERLAY_DEFAULTS
   }
 })
 
-function getApiKey(): string {
-  const enc = store.get('apiKeyEnc')
+// Diagnostic logging is opt-in (Settings → Debug logging). It used to be always on, which
+// grew the log files without bound and pushed every transcript fragment through IPC.
+let debugEnabled = store.get('debugLogging')
+
+// Verbose Chromium/native logging can only be configured before the app is ready, so this
+// part of the setting takes effect on the next launch.
+const chromiumDebugLogPath = join(app.getPath('userData'), 'chromium-debug.log')
+if (debugEnabled) {
+  try {
+    mkdirSync(dirname(chromiumDebugLogPath), { recursive: true })
+    app.commandLine.appendSwitch('enable-logging', 'file')
+    app.commandLine.appendSwitch('log-file', chromiumDebugLogPath)
+    app.commandLine.appendSwitch('v', '1')
+  } catch {
+    // Diagnostic logging must never prevent the app from starting.
+  }
+}
+
+type SecretField = 'apiKeyEnc' | 'sonioxKeyEnc'
+
+// Provider keys are stored encrypted with the OS keychain (safeStorage) and only ever
+// decrypted here in the main process.
+function getSecret(field: SecretField): string {
+  const enc = store.get(field)
   if (!enc) return ''
   if (!safeStorage.isEncryptionAvailable()) return ''
   try {
@@ -42,16 +68,17 @@ function getApiKey(): string {
   }
 }
 
-function setApiKey(key: string): boolean {
+function setSecret(field: SecretField, key: string): boolean {
   if (!key) {
-    store.delete('apiKeyEnc')
+    store.delete(field)
     return true
   }
   if (!safeStorage.isEncryptionAvailable()) return false
-  const enc = safeStorage.encryptString(key).toString('base64')
-  store.set('apiKeyEnc', enc)
+  store.set(field, safeStorage.encryptString(key).toString('base64'))
   return true
 }
+
+const getApiKey = (): string => getSecret('apiKeyEnc')
 
 let mainWindow: BrowserWindow | null = null
 
@@ -59,6 +86,7 @@ let mainWindow: BrowserWindow | null = null
 // Never log API keys or raw audio payloads.
 const debugLogPath = join(app.getPath('userData'), 'live-trans-debug.log')
 function debugLog(event: string, data?: unknown): void {
+  if (!debugEnabled) return
   const timestamp = new Date().toISOString()
   let suffix = ''
   if (data !== undefined) {
@@ -99,7 +127,10 @@ function createWindow(): void {
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
-      sandbox: false
+      // The renderer only talks to the OS through the preload bridge, so it can run sandboxed.
+      sandbox: true,
+      contextIsolation: true,
+      nodeIntegration: false
     }
   })
 
@@ -111,6 +142,10 @@ function createWindow(): void {
 
   win.on('closed', () => {
     if (mainWindow === win) mainWindow = null
+    // The overlay and tray belong to the main window's session; without them the app can
+    // quit normally (window-all-closed) instead of lingering with an orphan overlay.
+    overlay?.destroy()
+    if (process.platform !== 'darwin') tray?.destroy()
   })
 
   win.webContents.on('console-message', (_event, level, message, line, sourceId) => {
@@ -122,12 +157,67 @@ function createWindow(): void {
     return { action: 'deny' }
   })
 
+  loadRenderer(win)
+}
+
+// The main window and the subtitles overlay share one renderer bundle; the hash picks the view.
+function loadRenderer(win: BrowserWindow, hash = ''): void {
   if (process.env['ELECTRON_RENDERER_URL']) {
-    win.loadURL(process.env['ELECTRON_RENDERER_URL'])
+    win.loadURL(process.env['ELECTRON_RENDERER_URL'] + (hash ? `#${hash}` : ''))
   } else {
-    win.loadFile(join(__dirname, '../renderer/index.html'))
+    win.loadFile(join(__dirname, '../renderer/index.html'), hash ? { hash } : undefined)
   }
 }
+
+// ---- UI language, subtitles overlay, tray and global shortcuts ----
+let uiLanguage: UiLanguage = 'en'
+const t = (key: MainStringKey, params?: Record<string, string>): string => mainText(uiLanguage, key, params)
+
+// Ctrl/Cmd+Shift+F7/F8: function-key combinations are rarely taken by other apps, so a global
+// registration does not steal common shortcuts (Ctrl+Shift+T reopens browser tabs, etc.).
+const SHORTCUTS = { translation: 'CommandOrControl+Shift+F7', overlay: 'CommandOrControl+Shift+F8' }
+const shortcutStatus = { translation: false, overlay: false }
+
+let overlay: OverlayController | null = null
+let tray: AppTray | null = null
+
+function trayLabels() {
+  return {
+    show: t('trayShow'),
+    start: t('trayStart'),
+    stop: t('trayStop'),
+    showSubtitles: t('trayShowSubtitles'),
+    hideSubtitles: t('trayHideSubtitles'),
+    quit: t('trayQuit'),
+    tooltipIdle: t('trayIdle'),
+    tooltipRunning: t('trayRunning')
+  }
+}
+
+function showMainWindow(): void {
+  if (!mainWindow) createWindow()
+  else {
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.show()
+    mainWindow.focus()
+  }
+}
+
+function requestToggleTranslation(): void {
+  // Start/stop lives in the main window's renderer (it owns capture and the session).
+  if (!mainWindow) return showMainWindow()
+  mainWindow.webContents.send('hotkey:toggleTranslation')
+}
+
+function registerShortcuts(): void {
+  globalShortcut.unregisterAll()
+  shortcutStatus.translation = globalShortcut.register(SHORTCUTS.translation, requestToggleTranslation)
+  shortcutStatus.overlay = globalShortcut.register(SHORTCUTS.overlay, () => overlay?.toggle())
+  debugLog('shortcuts', shortcutStatus)
+}
+
+ipcMain.handle('shortcuts:get', () => ({ ...SHORTCUTS, registered: { ...shortcutStatus } }))
+ipcMain.on('app:status', (_e, status: { running: boolean }) => tray?.setRunning(!!status?.running))
 
 // ---- System audio capture (per-platform loopback tap) ----
 // We capture the WHOLE system output EXCEPT our own Electron process tree, so the model never
@@ -344,7 +434,10 @@ ipcMain.handle('capture:start', () => {
 
 ipcMain.handle('capture:stop', () => {
   debugLog('capture-stop-ipc')
-  stopCapture()
+  // macOS keeps the Core Audio tap alive between sessions so TCC does not prompt again.
+  // Windows has no such constraint, so the WASAPI helper is terminated instead of idling.
+  if (process.platform === 'win32') disposeCaptureProcess()
+  else stopCapture()
   return true
 })
 
@@ -352,26 +445,107 @@ app.on('before-quit', () => { debugLog('before-quit'); disposeCaptureProcess() }
 
 // ---- IPC ----
 ipcMain.handle('debug:getPath', () => debugLogPath)
+ipcMain.handle('debug:enabled', () => debugEnabled)
 
 ipcMain.handle('debug:log', (_e, event: string, data?: unknown) => {
-  debugLog(
-    `renderer:${String(event)}`,
-    data
-  )
+  debugLog(`renderer:${String(event)}`, data)
   return true
 })
 
+ipcMain.handle('debug:openFolder', () => shell.openPath(dirname(debugLogPath)))
+
+ipcMain.handle('settings:setDebugLogging', (_e, enabled: boolean) => {
+  debugEnabled = !!enabled
+  store.set('debugLogging', debugEnabled)
+  if (debugEnabled) debugLog('debug-logging-enabled', { appVersion: app.getVersion(), platform: process.platform })
+  return debugEnabled
+})
+
+// The API key itself never leaves the main process; the renderer only learns whether one exists.
 ipcMain.handle('settings:get', () => ({
-  hasApiKey: !!store.get('apiKeyEnc'),
-  apiKey: getApiKey(),
+  hasApiKey: !!getApiKey(),
+  hasSonioxKey: !!getSecret('sonioxKeyEnc'),
+  provider: store.get('provider'),
+  echoTargetLanguage: store.get('echoTargetLanguage'),
+  uiLanguage,
   sourceLang: store.get('sourceLang'),
   targetLang: store.get('targetLang'),
   audioSourceId: store.get('audioSourceId'),
+  debugLogging: debugEnabled,
   encryptionAvailable: safeStorage.isEncryptionAvailable(),
   platform: process.platform
 }))
 
-ipcMain.handle('settings:setApiKey', (_e, key: string) => setApiKey(key))
+ipcMain.handle('settings:setApiKey', (_e, key: string) => setSecret('apiKeyEnc', String(key ?? '').trim()))
+ipcMain.handle('settings:setSonioxKey', (_e, key: string) => setSecret('sonioxKeyEnc', String(key ?? '').trim()))
+
+// Soniox temporary key for one WebSocket connection, minted with the long-lived key that
+// stays here. Temporary keys start with snx_temp_ and are passed via the subprotocol list.
+const SONIOX_TEMP_KEY_URL = 'https://api.soniox.com/v1/auth/temporary-api-key'
+ipcMain.handle('soniox:createToken', async (): Promise<{ ok: true; token: string } | { ok: false; error: string }> => {
+  const apiKey = getSecret('sonioxKeyEnc')
+  if (!apiKey) return { ok: false, error: t('sonioxKeyMissing') }
+  try {
+    const res = await net.fetch(SONIOX_TEMP_KEY_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        usage_type: 'transcribe_websocket',
+        expires_in_seconds: 120,
+        single_use: true,
+        client_reference_id: 'live-trans'
+      })
+    })
+    const body = (await res.json().catch(() => ({}))) as {
+      api_key?: string
+      apiKey?: string
+      error_message?: string
+      message?: string
+    }
+    const token = body.api_key ?? body.apiKey
+    if (!res.ok || !token) {
+      const detail = body.error_message || body.message || `HTTP ${res.status}`
+      debugLog('soniox-token-error', { status: res.status, detail })
+      return { ok: false, error: t('sonioxTokenFailed', { detail }) }
+    }
+    return { ok: true, token }
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err)
+    debugLog('soniox-token-network-error', { detail })
+    return { ok: false, error: t('sonioxUnreachable', { detail }) }
+  }
+})
+
+// Mint a short-lived Live API token for one WebSocket connection. Called for every connect
+// and reconnect, so a long session never outlives its token and the key stays here.
+const AUTH_TOKENS_URL = 'https://generativelanguage.googleapis.com/v1beta/auth_tokens'
+ipcMain.handle('live:createToken', async (): Promise<{ ok: true; token: string } | { ok: false; error: string }> => {
+  const apiKey = getApiKey()
+  if (!apiKey) return { ok: false, error: t('geminiKeyMissing') }
+  const now = Date.now()
+  try {
+    const res = await net.fetch(AUTH_TOKENS_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
+      body: JSON.stringify({
+        uses: 1,
+        expireTime: new Date(now + 30 * 60_000).toISOString(),
+        newSessionExpireTime: new Date(now + 2 * 60_000).toISOString()
+      })
+    })
+    const body = (await res.json().catch(() => ({}))) as { name?: string; error?: { message?: string } }
+    if (!res.ok || !body.name) {
+      const detail = body.error?.message || `HTTP ${res.status}`
+      debugLog('live-token-error', { status: res.status, detail })
+      return { ok: false, error: t('geminiTokenFailed', { detail }) }
+    }
+    return { ok: true, token: body.name }
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err)
+    debugLog('live-token-network-error', { detail })
+    return { ok: false, error: t('geminiUnreachable', { detail }) }
+  }
+})
 
 ipcMain.handle('perm:microphoneStatus', () => {
   if (process.platform !== 'darwin') {
@@ -428,6 +602,131 @@ ipcMain.handle('settings:setPrefs', (_e, prefs: Partial<Persisted>) => {
   if (typeof prefs.sourceLang === 'string') store.set('sourceLang', prefs.sourceLang)
   if (typeof prefs.targetLang === 'string') store.set('targetLang', prefs.targetLang)
   if (typeof prefs.audioSourceId === 'string') store.set('audioSourceId', prefs.audioSourceId)
+  if (prefs.provider === 'gemini' || prefs.provider === 'soniox') store.set('provider', prefs.provider)
+  if (typeof prefs.echoTargetLanguage === 'boolean') store.set('echoTargetLanguage', prefs.echoTargetLanguage)
+  if (prefs.uiLanguage === 'uk' || prefs.uiLanguage === 'en') {
+    store.set('uiLanguage', prefs.uiLanguage)
+    uiLanguage = prefs.uiLanguage
+    tray?.setLabels(trayLabels())
+    for (const w of BrowserWindow.getAllWindows()) w.webContents.send('ui:language', uiLanguage)
+  }
+  return true
+})
+
+// ---- Session history ----
+// One JSON file per session in userData/history. The renderer saves the running session
+// periodically and on stop, so a crash loses at most a few seconds of transcript.
+type HistorySegment = { source: string; target: string }
+type HistoryRecord = {
+  id: string
+  startedAt: number
+  endedAt: number
+  sourceLang: string
+  targetLang: string
+  audioSource: string
+  segments: HistorySegment[]
+}
+
+const historyDir = join(app.getPath('userData'), 'history')
+const HISTORY_ID = /^[A-Za-z0-9-]{1,64}$/
+
+function historyPath(id: string): string | null {
+  return HISTORY_ID.test(id) ? join(historyDir, `${id}.json`) : null
+}
+
+function sanitizeRecord(r: unknown): HistoryRecord | null {
+  if (!r || typeof r !== 'object') return null
+  const o = r as Record<string, unknown>
+  if (typeof o.id !== 'string' || !HISTORY_ID.test(o.id) || !Array.isArray(o.segments)) return null
+  return {
+    id: o.id,
+    startedAt: Number(o.startedAt) || 0,
+    endedAt: Number(o.endedAt) || 0,
+    sourceLang: String(o.sourceLang ?? ''),
+    targetLang: String(o.targetLang ?? ''),
+    audioSource: String(o.audioSource ?? ''),
+    segments: o.segments.map((s) => ({
+      source: String((s as HistorySegment)?.source ?? ''),
+      target: String((s as HistorySegment)?.target ?? '')
+    }))
+  }
+}
+
+ipcMain.handle('history:save', async (_e, raw: unknown) => {
+  const record = sanitizeRecord(raw)
+  const path = record && historyPath(record.id)
+  if (!record || !path) return false
+  try {
+    mkdirSync(historyDir, { recursive: true })
+    // Write-then-rename so an interrupted write never leaves a truncated session file.
+    const tmp = `${path}.tmp`
+    await writeFile(tmp, JSON.stringify(record), 'utf8')
+    await rename(tmp, path)
+    return true
+  } catch (err) {
+    debugLog('history-save-error', { error: String(err) })
+    return false
+  }
+})
+
+ipcMain.handle('history:list', async () => {
+  let files: string[] = []
+  try {
+    files = (await readdir(historyDir)).filter((f) => f.endsWith('.json'))
+  } catch {
+    return []
+  }
+  const out = []
+  for (const f of files) {
+    try {
+      const record = sanitizeRecord(JSON.parse(await readFile(join(historyDir, f), 'utf8')))
+      if (!record) continue
+      const { segments, ...meta } = record
+      const first = segments.find((s) => s.target || s.source)
+      out.push({ ...meta, segmentCount: segments.length, preview: (first?.target || first?.source || '').slice(0, 140) })
+    } catch {
+      // Skip unreadable files rather than failing the whole list.
+    }
+  }
+  return out.sort((a, b) => b.startedAt - a.startedAt)
+})
+
+ipcMain.handle('history:get', async (_e, id: string) => {
+  const path = historyPath(String(id))
+  if (!path) return null
+  try {
+    return sanitizeRecord(JSON.parse(await readFile(path, 'utf8')))
+  } catch {
+    return null
+  }
+})
+
+ipcMain.handle('history:delete', async (_e, id: string) => {
+  const path = historyPath(String(id))
+  if (!path) return false
+  await rm(path, { force: true })
+  return true
+})
+
+ipcMain.handle('export:saveText', async (_e, defaultName: string, content: string) => {
+  const safeName = String(defaultName).replace(/[\\/:*?"<>|]+/g, '-').slice(0, 120) || 'live-trans.txt'
+  const options = {
+    title: t('exportTitle'),
+    defaultPath: join(app.getPath('documents'), safeName),
+    filters: [{ name: t('exportFilter'), extensions: ['txt'] }]
+  }
+  const res = mainWindow ? await dialog.showSaveDialog(mainWindow, options) : await dialog.showSaveDialog(options)
+  if (res.canceled || !res.filePath) return { ok: false, canceled: true }
+  try {
+    await writeFile(res.filePath, String(content), 'utf8')
+    return { ok: true, path: res.filePath }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) }
+  }
+})
+
+ipcMain.handle('clipboard:writeText', (_e, text: string) => {
+  clipboard.writeText(String(text))
   return true
 })
 
@@ -460,7 +759,27 @@ app.whenReady().then(() => {
     callback(wantsAudio)
   })
 
+  uiLanguage = resolveUiLanguage(store.get('uiLanguage'), app.getLocale())
+
   createWindow()
+
+  overlay = new OverlayController({
+    preloadPath: join(__dirname, '../preload/index.js'),
+    load: loadRenderer,
+    getSettings: () => store.get('overlay'),
+    saveSettings: (s) => store.set('overlay', s),
+    getMainWindow: () => mainWindow,
+    onVisibilityChange: (v) => tray?.setOverlayVisible(v)
+  })
+
+  tray = new AppTray({
+    onShowWindow: showMainWindow,
+    onToggleTranslation: requestToggleTranslation,
+    onToggleOverlay: () => overlay?.toggle(),
+    onQuit: () => app.quit()
+  })
+  tray.create(trayLabels(), SHORTCUTS)
+  registerShortcuts()
 
   // Do not start the native system-audio helper at application startup.
   // It owns a separate Core Audio/TCC path and can interfere with microphone
@@ -468,9 +787,11 @@ app.whenReady().then(() => {
   debugLog('capture-startup-skipped', { reason: 'lazy-start' })
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    if (!mainWindow) createWindow()
   })
 })
+
+app.on('will-quit', () => globalShortcut.unregisterAll())
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()

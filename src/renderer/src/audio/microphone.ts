@@ -1,3 +1,4 @@
+import { t } from '../lib/i18n'
 export type MicrophoneHandlers = {
   onChunk: (base64Pcm: string) => void
   onLevel: (rms: number) => void
@@ -6,22 +7,45 @@ export type MicrophoneHandlers = {
 
 const FRAME_SAMPLES = 1600 // 100 ms at 16 kHz
 
-function floatToBase64Pcm16(samples: Float32Array): { b64: string; rms: number } {
-  const bytes = new Uint8Array(samples.length * 2)
-  let sumSq = 0
-  const view = new DataView(bytes.buffer)
-  for (let i = 0; i < samples.length; i++) {
-    const s = Math.max(-1, Math.min(1, samples[i]))
-    sumSq += s * s
-    const value = s < 0 ? s * 0x8000 : s * 0x7fff
-    view.setInt16(i * 2, Math.round(value), true)
+// Runs on the audio rendering thread. It packs the incoming float samples into exact 100 ms
+// Int16 frames and transfers each finished frame (plus its RMS) to the main thread, so the
+// UI thread no longer does per-sample work and UI load can't cause dropouts.
+const WORKLET_SOURCE = `
+class PcmFramer extends AudioWorkletProcessor {
+  constructor() {
+    super()
+    this.frame = new Int16Array(${FRAME_SAMPLES})
+    this.fill = 0
+    this.sumSq = 0
   }
+  process(inputs) {
+    const channel = inputs[0] && inputs[0][0]
+    if (!channel) return true
+    for (let i = 0; i < channel.length; i++) {
+      const s = Math.max(-1, Math.min(1, channel[i]))
+      this.sumSq += s * s
+      this.frame[this.fill++] = s < 0 ? Math.round(s * 0x8000) : Math.round(s * 0x7fff)
+      if (this.fill === ${FRAME_SAMPLES}) {
+        const rms = Math.sqrt(this.sumSq / ${FRAME_SAMPLES})
+        this.port.postMessage({ pcm: this.frame.buffer, rms }, [this.frame.buffer])
+        this.frame = new Int16Array(${FRAME_SAMPLES})
+        this.fill = 0
+        this.sumSq = 0
+      }
+    }
+    return true
+  }
+}
+registerProcessor('pcm-framer', PcmFramer)
+`
+
+export function bytesToBase64(bytes: Uint8Array): string {
   let binary = ''
   const step = 0x8000
   for (let i = 0; i < bytes.length; i += step) {
     binary += String.fromCharCode(...bytes.subarray(i, Math.min(i + step, bytes.length)))
   }
-  return { b64: btoa(binary), rms: Math.sqrt(sumSq / Math.max(1, samples.length)) }
+  return btoa(binary)
 }
 
 /** Captures a selected microphone/input device and converts it to 16 kHz mono PCM. */
@@ -29,33 +53,12 @@ export class MicrophoneAudioCapture {
   private stream: MediaStream | null = null
   private ctx: AudioContext | null = null
   private source: MediaStreamAudioSourceNode | null = null
-  private processor: ScriptProcessorNode | null = null
+  private worklet: AudioWorkletNode | null = null
   private silentGain: GainNode | null = null
-  private pending = new Float32Array(0)
 
   async start(deviceId: string, handlers: MicrophoneHandlers): Promise<void> {
-    await window.api.debugLog('microphone.start.begin', {
-      deviceId,
-      readyState: document.readyState,
-      userAgent: navigator.userAgent,
-      platform: navigator.platform
-    })
     await this.stop()
     try {
-      await window.api.debugLog('microphone.getUserMedia.before', {
-        deviceId,
-        constraints: {
-          audio: {
-            deviceId: deviceId && deviceId !== 'default' ? { exact: deviceId } : undefined,
-            channelCount: 1,
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false
-          },
-          video: false
-        }
-      })
-      const startedAt = Date.now()
       this.stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           deviceId: deviceId && deviceId !== 'default' ? { exact: deviceId } : undefined,
@@ -66,78 +69,62 @@ export class MicrophoneAudioCapture {
         },
         video: false
       })
-      await window.api.debugLog('microphone.getUserMedia.after', {
-        elapsedMs: Date.now() - startedAt,
-        streamId: this.stream.id,
-        tracks: this.stream.getAudioTracks().map((track) => ({
-          id: track.id,
-          label: track.label,
-          readyState: track.readyState,
-          enabled: track.enabled,
-          muted: track.muted,
-          settings: track.getSettings()
-        }))
-      })
-      this.stream.getAudioTracks().forEach((track) => {
-        track.onended = () => void window.api.debugLog('microphone.track.ended', { trackId: track.id, label: track.label })
-        track.onmute = () => void window.api.debugLog('microphone.track.mute', { trackId: track.id, label: track.label })
-        track.onunmute = () => void window.api.debugLog('microphone.track.unmute', { trackId: track.id, label: track.label })
-      })
+      const track = this.stream.getAudioTracks()[0]
+      void window.api.debugLog('microphone.stream', { label: track?.label, settings: track?.getSettings() })
+      track?.addEventListener('ended', () => handlers.onError(t('micDisconnected')))
+
+      // Chromium resamples the device rate to 16 kHz for us.
       this.ctx = new AudioContext({ sampleRate: 16000 })
+      const moduleUrl = URL.createObjectURL(new Blob([WORKLET_SOURCE], { type: 'application/javascript' }))
+      try {
+        await this.ctx.audioWorklet.addModule(moduleUrl)
+      } finally {
+        URL.revokeObjectURL(moduleUrl)
+      }
+
       this.source = this.ctx.createMediaStreamSource(this.stream)
-      this.processor = this.ctx.createScriptProcessor(4096, 1, 1)
+      this.worklet = new AudioWorkletNode(this.ctx, 'pcm-framer', {
+        numberOfInputs: 1,
+        numberOfOutputs: 1,
+        outputChannelCount: [1]
+      })
+      this.worklet.port.onmessage = (event: MessageEvent<{ pcm: ArrayBuffer; rms: number }>) => {
+        handlers.onLevel(event.data.rms)
+        handlers.onChunk(bytesToBase64(new Uint8Array(event.data.pcm)))
+      }
+      // The graph must reach the destination to be pulled; a zero gain keeps it silent.
       this.silentGain = this.ctx.createGain()
       this.silentGain.gain.value = 0
-      this.processor.onaudioprocess = (event) => {
-        const input = event.inputBuffer.getChannelData(0)
-        const merged = new Float32Array(this.pending.length + input.length)
-        merged.set(this.pending)
-        merged.set(input, this.pending.length)
-        let offset = 0
-        while (merged.length - offset >= FRAME_SAMPLES) {
-          const frame = merged.slice(offset, offset + FRAME_SAMPLES)
-          offset += FRAME_SAMPLES
-          const { b64, rms } = floatToBase64Pcm16(frame)
-          handlers.onLevel(rms)
-          handlers.onChunk(b64)
-        }
-        this.pending = merged.slice(offset)
-      }
-      this.source.connect(this.processor)
-      this.processor.connect(this.silentGain)
+      this.source.connect(this.worklet)
+      this.worklet.connect(this.silentGain)
       this.silentGain.connect(this.ctx.destination)
       await this.ctx.resume()
-      await window.api.debugLog('microphone.start.success', { audioContextState: this.ctx.state, sampleRate: this.ctx.sampleRate })
+      void window.api.debugLog('microphone.started', { state: this.ctx.state, sampleRate: this.ctx.sampleRate })
     } catch (err) {
-      await window.api.debugLog('microphone.start.error', { error: err instanceof Error ? { name: err.name, message: err.message, stack: err.stack } : String(err) })
+      void window.api.debugLog('microphone.start-error', { error: String(err) })
       await this.stop()
-      const message = err instanceof DOMException && err.name === 'NotAllowedError'
-        ? 'Microphone permission was denied.'
-        : err instanceof Error ? err.message : String(err)
+      const message =
+        err instanceof DOMException && err.name === 'NotAllowedError'
+          ? t('micDenied')
+          : err instanceof Error
+            ? err.message
+            : String(err)
       handlers.onError(message)
       throw new Error(message)
     }
   }
 
   async stop(): Promise<void> {
-    const hadResources = !!(this.stream || this.ctx || this.processor)
-    if (hadResources) {
-      await window.api.debugLog('microphone.stop.begin', {
-        streamId: this.stream?.id ?? null,
-        trackIds: this.stream?.getTracks().map((t) => t.id) ?? []
-      })
-    }
-    this.processor?.disconnect()
+    if (this.worklet) this.worklet.port.onmessage = null
+    this.worklet?.disconnect()
     this.silentGain?.disconnect()
     this.source?.disconnect()
     this.stream?.getTracks().forEach((track) => track.stop())
     await this.ctx?.close().catch(() => {})
-    this.processor = null
+    this.worklet = null
     this.silentGain = null
     this.source = null
     this.stream = null
     this.ctx = null
-    this.pending = new Float32Array(0)
-    if (hadResources) await window.api.debugLog('microphone.stop.done')
   }
 }

@@ -1,15 +1,16 @@
 {
   "name": "live-trans",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "description": "Real-time desktop translator for system audio, powered by Gemini 3.5 Live Translate",
   "main": "out/main/index.js",
-  "author": "minhnhat165",
+  "author": "maxud1980 (remake of Live Trans by minhnhat165)",
   "license": "SEE LICENSE IN LICENSE",
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "bun test",
     "dist:mac": "electron-vite build && electron-builder --mac",
     "pack:mac": "electron-vite build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac dir --arm64 -c.mac.notarize=false",
     "build:win-helper": "cmake -S native/win-audio-capture -B native/win-audio-capture/build -A x64 && cmake --build native/win-audio-capture/build --config Release",

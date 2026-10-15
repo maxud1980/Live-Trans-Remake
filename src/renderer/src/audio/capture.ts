@@ -1,3 +1,4 @@
+import { t } from '../lib/i18n'
 export type CaptureHandlers = {
   onChunk: (base64Pcm: string) => void
   onLevel: (rms: number) => void
@@ -18,7 +19,7 @@ export class SystemAudioCapture {
     const res = await window.api.startCapture()
     if (!res.ok) {
       await this.stop()
-      const msg = res.error || 'Could not start system audio capture.'
+      const msg = res.error || t('systemCaptureFailed')
       handlers.onError(msg)
       throw new Error(msg)
     }

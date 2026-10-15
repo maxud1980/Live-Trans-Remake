@@ -1,3 +1,35 @@
+## [0.1.13] — 2026-10-15
+
+### Added
+- Floating subtitles window: transparent, always on top (also over full-screen video), shows the latest translated lines. Unlocked it can be moved, resized and styled (text size, 1–4 lines, show original); locked, clicks pass through to the app underneath. Position and style are remembered.
+- Global shortcuts that work in any app: Ctrl/Cmd+Shift+F7 starts/stops translation, Ctrl/Cmd+Shift+F8 shows/hides the subtitles window. Settings shows them and warns if another app has taken one.
+- Tray / menu-bar icon with Start/Stop, subtitles window toggle, show window and quit.
+- Ukrainian interface (follows the OS language by default; switchable in Settings), including tray menu, dialogs and error messages.
+- Second translation service: **Soniox** real-time translation (`stt-rt-v5`), selectable in Settings. It returns text directly (original and translation in one stream) instead of synthesized audio. The Soniox key is stored encrypted like the Gemini key; each connection uses a short-lived temporary key.
+- Translation services sit behind one provider interface, so capture, line pairing, history and export work the same for both.
+- Full language lists: 78 languages for Gemini, 60 for Soniox, with Ukrainian, Russian and English pinned at the top. Each provider gets its own codes (e.g. `zh-Hans` → `zh`, `fil` → `tl` for Soniox).
+- Setting "Repeat speech already in the target language" (Gemini `echoTargetLanguage`; Soniox equivalent). Off by default, so an interviewer's questions in the target language appear only in the original column.
+- With Auto-detect, the source column header shows the detected language.
+- Paired transcript: each spoken line is shown next to its translation instead of two separate text blocks. Lines are split by pauses; a translation that lags behind is attached to the right line, and a line already in the target language (no translation) does not take the next speaker's translation.
+- History: every session is saved automatically on this device (every 10 s and on stop) and can be re-read, exported or deleted from the History window.
+- Export to .txt (original + translation, translation only, or original only) and copy to clipboard. No timecodes: in live use the audio often comes from different parts of a video.
+- Unit tests for the line pairing and the text export (`bun test`).
+
+### Fixed
+- The control bar fits narrow windows: controls shrink instead of overflowing, with a compact level meter and a shorter Start label.
+- Portuguese used the code `pt`, which Gemini Live Translate does not accept; it is now `pt-BR` / `pt-PT` (saved settings are migrated).
+- A failed capture start, an API error or a dropped connection no longer leaves the Gemini session open in the background. Every failure path now goes through one teardown that stops capture and closes the socket.
+- Audio captured while the session reconnects (goAway rotation or network loss) is buffered (up to 3 s) and sent once the new session is ready, instead of being dropped.
+- A session that never became ready (wrong key, no model access) now fails immediately with the server's reason instead of retrying 8 times.
+- Windows: the WASAPI capture helper is terminated on Stop instead of running until the app quits.
+
+### Changed
+- The Gemini API key never leaves the main process. Each connection uses a short-lived ephemeral token (v1beta `auth_tokens`, Live API `BidiGenerateContentConstrained` endpoint).
+- The renderer now runs sandboxed (`sandbox: true`, `contextIsolation: true`).
+- Debug logging is off by default and can be enabled in Settings → Diagnostics; per-fragment transcript logging was removed.
+- Microphone capture uses an AudioWorklet instead of the deprecated ScriptProcessorNode.
+- Settings: the saved key is no longer shown; it can be replaced or removed.
+
 ## [0.1.12] — 2026-10-12
 
 ### Fixed

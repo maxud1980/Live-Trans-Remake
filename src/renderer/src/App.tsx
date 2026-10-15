@@ -1,31 +1,59 @@
-import { memo, useEffect, useRef, useState } from 'react'
-import { LANGUAGES, shortLabel } from './lib/languages'
+import { useEffect, useRef, useState } from 'react'
+import { languagesFor, migrateLanguageCode, providerCode, shortLabel, type ProviderId } from './lib/languages'
 import { SystemAudioCapture } from './audio/capture'
 import { MicrophoneAudioCapture } from './audio/microphone'
-import { LiveTranslateClient } from './gemini/liveClient'
+import { GeminiProvider } from './providers/gemini'
+import { SonioxProvider } from './providers/soniox'
+import type { TranslationProvider } from './providers/types'
+import { providerInfo, SettingsModal } from './components/SettingsModal'
+import { setUiLanguage, t, type StringKey, type UiLanguage } from './lib/i18n'
+import { Segmenter, newSessionId, type Segment, type SessionRecord } from './lib/segments'
+import { Transcript } from './components/Transcript'
+import { ExportMenu } from './components/ExportMenu'
+import { HistoryModal } from './components/HistoryModal'
 
 type Status = 'idle' | 'connecting' | 'listening' | 'error'
-type AudioDevice = { deviceId: string; label: string }
+type AudioDevice = { deviceId: string; label: string; index: number }
 const SYSTEM_AUDIO_ID = '__system_audio__'
 
-// Transcripts stream for the whole length of a video; cap the retained text so a long
-// session can't grow an unbounded string that re-renders slower and slower.
-const MAX_TRANSCRIPT_CHARS = 8000
-function appendCapped(prev: string, addition: string): string {
-  const next = prev + addition
-  return next.length > MAX_TRANSCRIPT_CHARS ? next.slice(next.length - MAX_TRANSCRIPT_CHARS) : next
+// How often pause-based line breaks are checked, and how often a running session is
+// written to History (so a crash loses at most this much transcript).
+const SEGMENT_TICK_MS = 500
+const AUTOSAVE_MS = 10_000
+
+type SessionMeta = Omit<SessionRecord, 'segments' | 'endedAt'>
+
+// Keep a language choice valid for a provider: an unsupported source falls back to
+// Auto-detect, an unsupported target to English.
+function fitLanguages(p: ProviderId, source: string, target: string): { source: string; target: string } {
+  return {
+    source: source === 'auto' || providerCode(p, source) ? source : 'auto',
+    target: providerCode(p, target) ? target : 'en'
+  }
 }
 
-const STATUS_LABEL: Record<Status, string> = {
-  idle: 'Idle',
-  connecting: 'Connecting',
-  listening: 'Listening',
-  error: 'Error'
+const STATUS_LABEL: Record<Status, StringKey> = {
+  idle: 'statusIdle',
+  connecting: 'statusConnecting',
+  listening: 'statusListening',
+  error: 'statusError'
 }
+
+// How many recent lines the subtitles window receives (it shows up to 4).
+const OVERLAY_LINES = 6
+
+const capitalize = (text: string): string => text.charAt(0).toUpperCase() + text.slice(1)
 
 export default function App(): React.JSX.Element {
-  const [apiKey, setApiKey] = useState('')
-  const [keySaved, setKeySaved] = useState(false)
+  // Whether a key is saved per provider; the keys themselves never leave the main process.
+  const [keys, setKeys] = useState<Record<ProviderId, boolean>>({ gemini: false, soniox: false })
+  const [provider, setProvider] = useState<ProviderId>('gemini')
+  const [echoTargetLanguage, setEchoTargetLanguage] = useState(false)
+  // Language the service detected in the source speech (when the source is Auto-detect).
+  const [detectedLang, setDetectedLang] = useState<string | null>(null)
+  const [debugLogging, setDebugLogging] = useState(false)
+  const [uiLanguage, setUiLanguageState] = useState<UiLanguage>('en')
+  const [overlayVisible, setOverlayVisible] = useState(false)
   const [sourceLang, setSourceLang] = useState('auto')
   const [targetLang, setTargetLang] = useState('en')
   const [audioSourceId, setAudioSourceId] = useState(SYSTEM_AUDIO_ID)
@@ -34,26 +62,37 @@ export default function App(): React.JSX.Element {
   const [message, setMessage] = useState('')
   const [level, setLevel] = useState(0)
 
-  // Transcripts arrive as incremental deltas (small fragments), so we append them.
-  // turnComplete is rare/absent for this model; we add a line break when it does arrive.
-  const [original, setOriginal] = useState('')
-  const [translated, setTranslated] = useState('')
+  // Transcript deltas are grouped into paired lines (original ↔ translation) by the segmenter.
+  const [segments, setSegments] = useState<Segment[]>([])
   const [showSettings, setShowSettings] = useState(true)
+  const [showHistory, setShowHistory] = useState(false)
   // macOS uses a hidden-inset title bar (content slides under the traffic lights); Windows/Linux
   // keep the native frame, so we only reserve the traffic-light strip on macOS.
   const [isMac, setIsMac] = useState(false)
 
   const systemCaptureRef = useRef<SystemAudioCapture | null>(null)
   const microphoneCaptureRef = useRef<MicrophoneAudioCapture | null>(null)
-  const clientRef = useRef<LiveTranslateClient | null>(null)
+  const clientRef = useRef<TranslationProvider | null>(null)
   const startingRef = useRef(false)
+  // Incremented on every start/stop; callbacks from an older session check it and bail out.
+  const sessionRef = useRef(0)
   const microphonePrimeRef = useRef<Promise<boolean> | null>(null)
-  const origRef = useRef<HTMLDivElement | null>(null)
-  const transRef = useRef<HTMLDivElement | null>(null)
+  const segmenterRef = useRef(new Segmenter())
+  // Metadata of the current (or most recently finished) session, for autosave and export.
+  const sessionMetaRef = useRef<SessionMeta | null>(null)
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
 
   const running = status === 'connecting' || status === 'listening'
   const targetName = shortLabel(targetLang)
-  const sourceName = sourceLang === 'auto' ? 'Auto-detect' : shortLabel(sourceLang)
+  const sourceName =
+    sourceLang === 'auto'
+      ? detectedLang
+        ? t('autoDetectWith', { lang: shortLabel(detectedLang) })
+        : t('autoDetect')
+      : shortLabel(sourceLang)
+  const deviceLabel = (d: AudioDevice): string => d.label || t('microphoneN', { n: d.index + 1 })
+  const languages = languagesFor(provider)
+  const keySaved = keys[provider]
 
   // ---- initial load ----
   useEffect(() => {
@@ -76,16 +115,25 @@ export default function App(): React.JSX.Element {
       try {
         void window.api.debugLog('app.initial-load.begin')
         const s = await window.api.getSettings()
-        void window.api.debugLog('app.initial-load.settings', { ...s, apiKey: s.apiKey ? '<present>' : '' })
+        void window.api.debugLog('app.initial-load.settings', s)
         if (cancelled) return
 
-        setApiKey(s.apiKey)
-        setKeySaved(s.hasApiKey)
-        setSourceLang(s.sourceLang)
-        setTargetLang(s.targetLang)
+        setDebugLogging(s.debugLogging)
+        setUiLanguage(s.uiLanguage)
+        setUiLanguageState(s.uiLanguage)
+        const prov: ProviderId = s.provider === 'soniox' ? 'soniox' : 'gemini'
+        setProvider(prov)
+        setKeys({ gemini: s.hasApiKey, soniox: s.hasSonioxKey })
+        setEchoTargetLanguage(s.echoTargetLanguage)
+        const langs = fitLanguages(prov, migrateLanguageCode(s.sourceLang), migrateLanguageCode(s.targetLang))
+        setSourceLang(langs.source)
+        setTargetLang(langs.target)
+        if (langs.source !== s.sourceLang || langs.target !== s.targetLang) {
+          void window.api.setPrefs({ sourceLang: langs.source, targetLang: langs.target })
+        }
         setAudioSourceId(s.audioSourceId || SYSTEM_AUDIO_ID)
         setIsMac(s.platform === 'darwin')
-        if (s.hasApiKey) setShowSettings(false)
+        if (prov === 'soniox' ? s.hasSonioxKey : s.hasApiKey) setShowSettings(false)
 
         // Let Chromium's getUserMedia be the only microphone authorization path.
         // Prime it exactly once on macOS so device labels become available, then only
@@ -101,20 +149,63 @@ export default function App(): React.JSX.Element {
       }
     })()
 
+    void window.api.isOverlayVisible().then(setOverlayVisible)
+    const offOverlay = window.api.onOverlayVisible(setOverlayVisible)
+    // Global shortcut and tray menu: routed through a ref so they always see current state.
+    const offToggle = window.api.onToggleTranslationRequest(() => toggleRef.current())
+
     return () => {
       cancelled = true
+      offOverlay()
+      offToggle()
       navigator.mediaDevices?.removeEventListener('devicechange', onDeviceChange)
       void window.api.debugLog('app.unmount')
     }
   }, [])
 
-  // auto-scroll transcripts
+  // Tray menu label follows the session state.
   useEffect(() => {
-    origRef.current?.scrollTo({ top: origRef.current.scrollHeight })
-  }, [original])
+    window.api.reportStatus(running)
+  }, [running])
+
+  // Feed the subtitles window with the latest lines while it is open.
   useEffect(() => {
-    transRef.current?.scrollTo({ top: transRef.current.scrollHeight })
-  }, [translated])
+    if (!overlayVisible) return
+    window.api.sendOverlayLines(
+      segments.slice(-OVERLAY_LINES).map((s) => ({ source: s.source, target: s.target, open: s.open }))
+    )
+  }, [segments, overlayVisible])
+
+  // While a session runs: close lines after a pause, and autosave it to History.
+  useEffect(() => {
+    if (!running) return
+    const tick = setInterval(() => {
+      if (segmenterRef.current.tick(Date.now())) setSegments(segmenterRef.current.segments)
+    }, SEGMENT_TICK_MS)
+    const save = setInterval(() => void saveSession(), AUTOSAVE_MS)
+    return () => {
+      clearInterval(tick)
+      clearInterval(save)
+    }
+  }, [running])
+
+  function sessionRecord(): SessionRecord | null {
+    const meta = sessionMetaRef.current
+    if (!meta) return null
+    const lines = segmenterRef.current.segments
+      .map((s) => ({ source: s.source.trim(), target: s.target.trim() }))
+      .filter((s) => s.source || s.target)
+    return { ...meta, endedAt: Date.now(), segments: lines }
+  }
+
+  async function saveSession(): Promise<void> {
+    const record = sessionRecord()
+    if (record && record.segments.length) await window.api.saveHistory(record)
+  }
+
+  function closeLine(): void {
+    if (segmenterRef.current.close(Date.now())) setSegments(segmenterRef.current.segments)
+  }
 
   // Microphone consent is decided ONCE by the main process via the native macOS API
   // (askForMediaAccess, only while status is 'not-determined'). Only after the OS reports
@@ -162,7 +253,7 @@ export default function App(): React.JSX.Element {
       })))
       const inputs = devices
         .filter((d) => d.kind === 'audioinput')
-        .map((d, index) => ({ deviceId: d.deviceId, label: d.label || "Microphone " + (index + 1) }))
+        .map((d, index) => ({ deviceId: d.deviceId, label: d.label, index }))
       void window.api.debugLog('devices.audio-inputs', inputs)
       setAudioDevices(inputs)
     } catch (err) {
@@ -171,141 +262,212 @@ export default function App(): React.JSX.Element {
     }
   }
 
-  async function saveKey(): Promise<void> {
-    const ok = await window.api.setApiKey(apiKey.trim())
-    setKeySaved(ok && !!apiKey.trim())
-    setMessage(ok ? 'API key saved (encrypted).' : 'Could not save key — OS encryption unavailable.')
+  async function saveKey(p: ProviderId, key: string): Promise<boolean> {
+    const ok = await (p === 'soniox' ? window.api.setSonioxKey(key) : window.api.setApiKey(key))
+    if (ok) setKeys((k) => ({ ...k, [p]: true }))
+    setMessage(ok ? capitalize(t('keySaved', { key: providerInfo(p).keyLabel })) : t('keySaveFailed'))
+    return ok
+  }
+
+  async function removeKey(p: ProviderId): Promise<void> {
+    await (p === 'soniox' ? window.api.setSonioxKey('') : window.api.setApiKey(''))
+    setKeys((k) => ({ ...k, [p]: false }))
+    setMessage(capitalize(t('keyRemoved', { key: providerInfo(p).keyLabel })))
+  }
+
+  function onProviderChange(p: ProviderId): void {
+    if (running || startingRef.current || p === provider) return
+    setProvider(p)
+    // Keep the chosen languages where the new service supports them.
+    const langs = fitLanguages(p, sourceLang, targetLang)
+    setSourceLang(langs.source)
+    setTargetLang(langs.target)
+    void window.api.setPrefs({ provider: p, sourceLang: langs.source, targetLang: langs.target })
+    if (langs.target !== targetLang || langs.source !== sourceLang) {
+      setMessage(t('languageReset', { service: providerInfo(p).short }))
+    }
+  }
+
+  function onUiLanguageChange(lang: UiLanguage): void {
+    setUiLanguage(lang)
+    setUiLanguageState(lang)
+    void window.api.setPrefs({ uiLanguage: lang })
+  }
+
+  function onEchoChange(v: boolean): void {
+    setEchoTargetLanguage(v)
+    void window.api.setPrefs({ echoTargetLanguage: v })
+  }
+
+  async function onDebugLoggingChange(enabled: boolean): Promise<void> {
+    setDebugLogging(await window.api.setDebugLogging(enabled))
+  }
+
+  // The single exit path for a session: stops capture, closes the socket and settles the UI.
+  // Every failure branch (capture, API error, connection loss) ends here, so a broken session
+  // can never keep a WebSocket open in the background.
+  async function teardown(outcome: { error?: string; message?: string } = {}): Promise<void> {
+    sessionRef.current++
+    startingRef.current = false
+    const systemCapture = systemCaptureRef.current
+    const microphoneCapture = microphoneCaptureRef.current
+    const client = clientRef.current
+    systemCaptureRef.current = null
+    microphoneCaptureRef.current = null
+    clientRef.current = null
+    client?.close()
+    await systemCapture?.stop()
+    await microphoneCapture?.stop()
+    closeLine()
+    await saveSession()
+    setActiveSessionId(null)
+    setLevel(0)
+    if (outcome.error) {
+      setStatus('error')
+      setMessage(outcome.error)
+    } else {
+      setStatus('idle')
+      setMessage(outcome.message ?? t('stopped'))
+    }
   }
 
   async function start(): Promise<void> {
-    void window.api.debugLog('app.start.called', { starting: startingRef.current, running, audioSourceId, apiKeyPresent: !!apiKey.trim() })
-    if (startingRef.current || running) {
-      void window.api.debugLog('app.start.ignored', { reason: startingRef.current ? 'already-starting' : 'already-running' })
+    if (startingRef.current || running) return
+    if (!keySaved) {
+      setStatus('error')
+      setMessage(t('enterKeyFirst', { key: providerInfo(provider).keyLabel }))
+      setShowSettings(true)
       return
     }
     startingRef.current = true
-    if (!apiKey.trim()) {
-      setStatus('error')
-      setMessage('Enter your Gemini API key first.')
-      setShowSettings(true)
-      startingRef.current = false
-      return
-    }
+    const session = ++sessionRef.current
+    const isCurrent = (): boolean => sessionRef.current === session
+    const isSystem = audioSourceId === SYSTEM_AUDIO_ID
+
     setStatus('connecting')
-    setMessage(audioSourceId === SYSTEM_AUDIO_ID ? 'Connecting — preparing system audio…' : 'Connecting — preparing microphone…')
-    setOriginal('')
-    setTranslated('')
-    void window.api.debugLog('app.start.session-begin', { audioSourceId, sourceLang, targetLang })
+    setMessage(isSystem ? t('connectingSystem') : t('connectingMic'))
+    const startedAt = Date.now()
+    const meta: SessionMeta = {
+      id: newSessionId(startedAt),
+      startedAt,
+      sourceLang,
+      targetLang,
+      audioSource: isSystem
+        ? t('systemAudio')
+        : (() => {
+            const d = audioDevices.find((x) => x.deviceId === audioSourceId)
+            return d ? deviceLabel(d) : t('microphone')
+          })()
+    }
+    sessionMetaRef.current = meta
+    setActiveSessionId(meta.id)
+    segmenterRef.current.reset()
+    setSegments([])
+    void window.api.debugLog('app.start', { audioSourceId, sourceLang, targetLang })
 
     // Permissions are requested once when the app starts. A translation session
     // only checks the already-granted microphone state and never asks macOS again.
-    if (audioSourceId !== SYSTEM_AUDIO_ID) {
+    if (!isSystem) {
       const microphoneStatus = await window.api.microphonePermissionStatus()
-      void window.api.debugLog('app.start.microphone-status', { microphoneStatus })
+      if (!isCurrent()) return
       if (microphoneStatus !== 'granted') {
         void window.api.debugLog('app.start.microphone-not-granted', { microphoneStatus })
-        setStatus('error')
-        setMessage('Microphone permission is not enabled. Opening System Settings → Privacy & Security → Microphone — enable live-trans there, then restart the app.')
         void window.api.openMicrophoneSettings()
-        startingRef.current = false
+        await teardown({
+          error: t('micPermission')
+        })
         return
       }
       await refreshDevices()
+      if (!isCurrent()) return
     }
 
-    void window.api.debugLog('app.start.create-capture', { audioSourceId, isSystemAudio: audioSourceId === SYSTEM_AUDIO_ID })
-    const client = new LiveTranslateClient()
-    const systemCapture = audioSourceId === SYSTEM_AUDIO_ID ? new SystemAudioCapture() : null
-    const microphoneCapture = audioSourceId === SYSTEM_AUDIO_ID ? null : new MicrophoneAudioCapture()
+    setDetectedLang(null)
+    const client: TranslationProvider = provider === 'soniox' ? new SonioxProvider() : new GeminiProvider()
+    const systemCapture = isSystem ? new SystemAudioCapture() : null
+    const microphoneCapture = isSystem ? null : new MicrophoneAudioCapture()
     systemCaptureRef.current = systemCapture
     microphoneCaptureRef.current = microphoneCapture
     clientRef.current = client
 
-    const handlers = {
+    const captureHandlers = {
       onChunk: (b64: string) => client.sendAudioChunk(b64),
-      onLevel: (rms: number) => setLevel(rms),
+      onLevel: (rms: number) => {
+        if (isCurrent()) setLevel(rms)
+      },
       onError: (m: string) => {
-        void window.api.debugLog('capture.handler.error', { message: m })
-        setStatus('error')
-        setMessage(`Capture error: ${m}`)
+        if (isCurrent()) void teardown({ error: t('captureError', { message: m }) })
       }
     }
 
-    void window.api.debugLog('gemini.connect.call')
     client.connect(
-      { apiKey: apiKey.trim(), sourceLanguageCode: sourceLang, targetLanguageCode: targetLang },
+      { sourceLanguageCode: sourceLang, targetLanguageCode: targetLang, echoTargetLanguage },
       {
         onReady: async () => {
-          void window.api.debugLog('gemini.onReady', { audioSourceId })
-          setMessage(audioSourceId === SYSTEM_AUDIO_ID ? 'Connected — capturing system audio…' : 'Connected — capturing microphone…')
+          if (!isCurrent()) return
+          setMessage(isSystem ? t('connectedSystem') : t('connectedMic'))
           try {
-            if (systemCapture) {
-              void window.api.debugLog('system-capture.start')
-              await systemCapture.start(handlers)
-              void window.api.debugLog('system-capture.start.success')
-            } else {
-              void window.api.debugLog('microphone-capture.start.call', { audioSourceId })
-              await microphoneCapture?.start(audioSourceId, handlers)
-              void window.api.debugLog('microphone-capture.start.returned')
-            }
-            setStatus('listening')
-            setMessage(audioSourceId === SYSTEM_AUDIO_ID ? 'Listening to system audio.' : 'Listening to microphone.')
-            startingRef.current = false
-          } catch (err) {
-            void window.api.debugLog('capture.start.error', { error: err instanceof Error ? { name: err.name, message: err.message, stack: err.stack } : String(err) })
-            startingRef.current = false
-            /* capture.start already reported the error */
+            if (systemCapture) await systemCapture.start(captureHandlers)
+            else await microphoneCapture?.start(audioSourceId, captureHandlers)
+          } catch {
+            // start() already reported through captureHandlers.onError → teardown.
+            return
           }
+          if (!isCurrent()) return
+          startingRef.current = false
+          setStatus('listening')
+          setMessage(isSystem ? t('listeningSystem') : t('listeningMic'))
         },
-        onReconnecting: (attempt, delayMs) => {
-          void window.api.debugLog('gemini.onReconnecting', { attempt, delayMs })
-          setStatus((s) => (s === 'error' ? s : 'connecting'))
-          setMessage(attempt === 0 ? 'Session rotating — reconnecting…' : `Connection dropped — reconnecting (attempt ${attempt})…`)
+        onReconnecting: (attempt) => {
+          if (!isCurrent()) return
+          closeLine()
+          setStatus('connecting')
+          setMessage(attempt === 0 ? t('rotating') : t('reconnecting', { n: attempt }))
         },
         onReconnected: () => {
-          void window.api.debugLog('gemini.onReconnected')
-          setStatus((s) => (s === 'error' ? s : 'listening'))
-          setMessage('Reconnected — resuming translation.')
+          if (!isCurrent()) return
+          setStatus('listening')
+          setMessage(t('reconnected'))
         },
-        onInputTranscript: (t) => { void window.api.debugLog('gemini.input-transcript', { length: t.length }); setOriginal((p) => appendCapped(p, t)) },
-        onOutputTranscript: (t) => { void window.api.debugLog('gemini.output-transcript', { length: t.length }); setTranslated((p) => appendCapped(p, t)) },
+        onInputTranscript: (t) => {
+          if (!isCurrent()) return
+          segmenterRef.current.addSource(t, Date.now())
+          setSegments(segmenterRef.current.segments)
+        },
+        onOutputTranscript: (t) => {
+          if (!isCurrent()) return
+          segmenterRef.current.addTarget(t, Date.now())
+          setSegments(segmenterRef.current.segments)
+        },
         onTurnComplete: () => {
-          setOriginal((p) => (p.endsWith('\n') ? p : p + '\n'))
-          setTranslated((p) => (p.endsWith('\n') ? p : p + '\n'))
+          if (isCurrent()) closeLine()
         },
-        onInterrupted: () => {},
+        onSourceLanguage: (code) => {
+          if (isCurrent()) setDetectedLang(code)
+        },
         onError: (m) => {
-          void window.api.debugLog('gemini.handler.error', { message: m })
-          setStatus('error')
-          setMessage(m)
+          if (isCurrent()) void teardown({ error: m })
         },
         onClose: ({ code, reason }) => {
-          void window.api.debugLog('gemini.onClose', { code, reason })
-          startingRef.current = false
-          setStatus((s) => (s === 'error' ? s : 'idle'))
-          setMessage(reason ? `Disconnected (${code}): ${reason}` : `Disconnected (${code}).`)
+          if (!isCurrent()) return
+          const text = reason ? t('disconnectedReason', { code, reason }) : t('disconnected', { code })
+          void teardown({ error: text })
         }
       }
     )
   }
 
   async function stop(): Promise<void> {
-    void window.api.debugLog('app.stop.called', { audioSourceId, status })
-    await systemCaptureRef.current?.stop()
-    await microphoneCaptureRef.current?.stop()
-    clientRef.current?.close()
-    systemCaptureRef.current = null
-    microphoneCaptureRef.current = null
-    clientRef.current = null
-    setStatus('idle')
-    setLevel(0)
-    setMessage('Stopped.')
+    void window.api.debugLog('app.stop', { audioSourceId, status })
+    await teardown({ message: t('stopped') })
   }
 
   function toggle(): void {
     if (running) void stop()
     else void start()
   }
+  const toggleRef = useRef(toggle)
+  toggleRef.current = toggle
 
   function onSourceLangChange(code: string): void {
     setSourceLang(code)
@@ -355,7 +517,7 @@ export default function App(): React.JSX.Element {
             <div className="leading-tight">
               <h1 className="text-[13px] font-semibold tracking-tight">live-trans</h1>
               <p className="text-[11px] text-faint">
-                Gemini 3.5 Live Translate · <span className="font-medium text-muted">{targetName}</span>
+                {providerInfo(provider).name} · <span className="font-medium text-muted">{targetName}</span>
               </p>
             </div>
           </div>
@@ -365,12 +527,30 @@ export default function App(): React.JSX.Element {
             className={`flex h-8 items-center gap-2 rounded-full border px-3 text-[11px] font-medium transition-colors ${pill}`}
           >
             <span className={`h-1.5 w-1.5 rounded-full ${dot} ${running ? 'animate-pulse' : ''}`} />
-            {STATUS_LABEL[status]}
+            {t(STATUS_LABEL[status])}
           </span>
+          <button
+            onClick={() => void window.api.toggleOverlay()}
+            className={`grid h-8 w-8 place-items-center rounded-lg border transition ${
+              overlayVisible
+                ? 'border-accent/50 bg-accent/15 text-accent'
+                : 'border-border bg-surface text-muted hover:border-border-strong hover:text-foreground'
+            }`}
+            title={t('subtitlesWindow')}
+          >
+            <SubtitlesIcon />
+          </button>
+          <button
+            onClick={() => setShowHistory(true)}
+            className="grid h-8 w-8 place-items-center rounded-lg border border-border bg-surface text-muted transition hover:border-border-strong hover:text-foreground"
+            title={t('history')}
+          >
+            <HistoryIcon />
+          </button>
           <button
             onClick={() => setShowSettings(true)}
             className="grid h-8 w-8 place-items-center rounded-lg border border-border bg-surface text-muted transition hover:border-border-strong hover:text-foreground"
-            title="Settings"
+            title={t('settings')}
           >
             <GearIcon />
           </button>
@@ -379,31 +559,35 @@ export default function App(): React.JSX.Element {
       </header>
 
       {/* ---- Transcripts ---- */}
-      <main className="grid min-h-0 flex-1 grid-cols-2 gap-3 px-4 pb-3 pt-3">
-        <Column
-          title={sourceName}
-          accent={false}
-          innerRef={origRef}
-          text={original}
-          live={running}
-          empty="Source speech appears here."
-        />
-        <Column
-          title={`Translation · ${targetName}`}
-          accent
-          innerRef={transRef}
-          text={translated}
-          live={running}
-          empty="Translated text appears here."
+      <main className="flex min-h-0 flex-1 flex-col px-4 pb-3 pt-3">
+        <Transcript
+          lines={segments}
+          sourceTitle={sourceName}
+          targetTitle={t('translationColumn', { lang: targetName })}
+          live={running && segments.length > 0}
+          emptyText={
+            running
+              ? t('waitingForSpeech')
+              : t('emptyTranscript')
+          }
+          actions={
+            <ExportMenu
+              getSession={sessionRecord}
+              disabled={segments.length === 0}
+              onResult={setMessage}
+              direction="down"
+              compact
+            />
+          }
         />
       </main>
 
       {/* ---- Control dock ---- */}
       <footer className="flex shrink-0 items-center justify-between gap-4 border-t border-border bg-surface/60 px-4 py-3">
-        <div className="flex items-center gap-3">
+        <div className="flex min-w-0 flex-1 items-center gap-3">
           <button
             onClick={toggle}
-            className={`flex h-10 items-center gap-2 rounded-lg px-4 text-[13px] font-semibold transition active:scale-[0.98] ${
+            className={`flex h-10 shrink-0 items-center gap-2 whitespace-nowrap rounded-lg px-4 text-[13px] font-semibold transition active:scale-[0.98] ${
               running
                 ? 'border border-border-strong bg-surface-2 text-red-300 hover:bg-elevated'
                 : 'bg-accent text-accent-fg shadow-[0_1px_0_rgba(255,255,255,0.12)_inset,0_2px_8px_rgba(20,184,166,0.25)] hover:bg-accent-hover'
@@ -411,48 +595,71 @@ export default function App(): React.JSX.Element {
           >
             {running ? (
               <>
-                <StopIcon /> Stop
+                <StopIcon /> {t('stop')}
               </>
             ) : (
               <>
-                <PlayIcon /> Enable translation
+                <PlayIcon />
+                <span className="hidden min-[1000px]:inline">{t('start')}</span>
+                <span className="min-[1000px]:hidden">{t('startShort')}</span>
               </>
             )}
           </button>
 
-          <div className="flex items-center gap-2">
-            <Select value={sourceLang} onChange={onSourceLangChange}>
-              <option value="auto">Auto-detect source</option>
-              {LANGUAGES.map((l) => <option key={l.code} value={l.code}>{l.label}</option>)}
+          <div className="flex min-w-0 flex-1 items-center gap-2">
+            <Select value={sourceLang} onChange={onSourceLangChange} className="min-w-28 max-w-56 flex-1 basis-0">
+              <option value="auto">{t('autoDetectSource')}</option>
+              {languages.map((l) => <option key={l.code} value={l.code}>{l.label}</option>)}
             </Select>
             <span className="text-faint">→</span>
-            <Select value={targetLang} onChange={onTargetChange}>
-              {LANGUAGES.map((l) => <option key={l.code} value={l.code}>{l.label}</option>)}
+            <Select value={targetLang} onChange={onTargetChange} className="min-w-28 max-w-56 flex-1 basis-0">
+              {languages.map((l) => <option key={l.code} value={l.code}>{l.label}</option>)}
             </Select>
-            <Select value={audioSourceId} onChange={onAudioSourceChange}>
-              <option value={SYSTEM_AUDIO_ID}>System audio</option>
-              {audioDevices.map((d) => <option key={d.deviceId} value={d.deviceId}>🎤 {d.label}</option>)}
+            <Select value={audioSourceId} onChange={onAudioSourceChange} className="min-w-28 max-w-44 flex-1 basis-0">
+              <option value={SYSTEM_AUDIO_ID}>{t('systemAudio')}</option>
+              {audioDevices.map((d) => <option key={d.deviceId} value={d.deviceId}>🎤 {deviceLabel(d)}</option>)}
 
             </Select>
           </div>
-          <Meter level={level} active={running} />
+          {/* Full meter on wide windows, a compact one when space is tight. */}
+          <div className="hidden shrink-0 min-[1000px]:block">
+            <Meter level={level} active={running} bars={20} />
+          </div>
+          <div className="shrink-0 min-[1000px]:hidden">
+            <Meter level={level} active={running} bars={8} />
+          </div>
         </div>
-
       </footer>
 
       {/* ---- Status line ---- */}
       <div className="shrink-0 border-t border-border bg-background px-4 py-1.5 text-[11px] text-faint">
-        {message || 'Ready.'}
+        {message || t('ready')}
       </div>
 
       {/* ---- Settings modal ---- */}
+      {showHistory && (
+        <HistoryModal
+          onClose={() => setShowHistory(false)}
+          activeSessionId={activeSessionId}
+          onMessage={setMessage}
+        />
+      )}
+
       {showSettings && (
         <SettingsModal
           onClose={() => setShowSettings(false)}
-          apiKey={apiKey}
-          setApiKey={setApiKey}
-          keySaved={keySaved}
-          saveKey={saveKey}
+          provider={provider}
+          onProviderChange={onProviderChange}
+          providerLocked={running}
+          keys={keys}
+          onSaveKey={saveKey}
+          onRemoveKey={removeKey}
+          echoTargetLanguage={echoTargetLanguage}
+          onEchoChange={onEchoChange}
+          uiLanguage={uiLanguage}
+          onUiLanguageChange={onUiLanguageChange}
+          debugLogging={debugLogging}
+          onDebugLoggingChange={onDebugLoggingChange}
         />
       )}
 
@@ -460,66 +667,21 @@ export default function App(): React.JSX.Element {
   )
 }
 
-/* =========================== Transcript column =========================== */
-
-// Memoized so frequent VU-meter updates don't re-render the growing transcript text.
-const Column = memo(function Column(props: {
-  title: string
-  accent: boolean
-  text: string
-  empty: string
-  live: boolean
-  innerRef: React.RefObject<HTMLDivElement | null>
-}): React.JSX.Element {
-  return (
-    <section className="flex min-h-0 flex-col overflow-hidden rounded-xl border border-border bg-surface/40">
-      <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
-        <span
-          className={`text-[11px] font-semibold uppercase tracking-[0.08em] ${
-            props.accent ? 'text-accent' : 'text-muted'
-          }`}
-        >
-          {props.title}
-        </span>
-        {props.live && props.text && (
-          <span className="flex items-center gap-1.5 text-[10px] text-faint">
-            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
-            live
-          </span>
-        )}
-      </div>
-      <div
-        ref={props.innerRef}
-        className="flex-1 overflow-y-auto px-4 py-3.5 text-[15px] leading-relaxed"
-      >
-        {props.text ? (
-          <p className="whitespace-pre-wrap text-foreground/90">{props.text}</p>
-        ) : (
-          <div className="flex h-full items-center justify-center">
-            <p className="max-w-[18rem] text-center text-[13px] text-faint">{props.empty}</p>
-          </div>
-        )}
-      </div>
-    </section>
-  )
-})
-
 /* =========================== VU meter =========================== */
 
-const METER_BARS = 20
-function Meter({ level, active }: { level: number; active: boolean }): React.JSX.Element {
+function Meter({ level, active, bars }: { level: number; active: boolean; bars: number }): React.JSX.Element {
   // RMS is a linear amplitude value (0..1). A linear UI scale makes normal
   // speech/music levels look almost dead, so map -60..0 dBFS to the meter.
   const db = level > 0 ? 20 * Math.log10(level) : -Infinity
   const pct = active ? Math.max(0, Math.min(100, ((db + 60) / 60) * 100)) : 0
-  const lit = Math.round((pct / 100) * METER_BARS)
+  const lit = Math.round((pct / 100) * bars)
   return (
-    <div className="flex h-10 items-center gap-2.5 rounded-lg border border-border bg-background/40 px-3">
+    <div className="flex h-10 shrink-0 items-center gap-2.5 rounded-lg border border-border bg-background/40 px-3">
       <span className={active ? 'text-accent' : 'text-faint'}>
         <MicIcon />
       </span>
       <div className="flex h-4 items-center gap-0.5">
-        {Array.from({ length: METER_BARS }).map((_, i) => {
+        {Array.from({ length: bars }).map((_, i) => {
           const on = i < lit
           return (
             <span
@@ -539,107 +701,16 @@ function Meter({ level, active }: { level: number; active: boolean }): React.JSX
 }
 
 
-/* =========================== Settings modal =========================== */
-
-function SettingsModal(props: {
-  onClose: () => void
-  apiKey: string
-  setApiKey: (v: string) => void
-  keySaved: boolean
-  saveKey: () => void
-}): React.JSX.Element {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') props.onClose()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [props])
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex animate-fade-in items-center justify-center bg-black/55 p-6 backdrop-blur-sm"
-      onClick={props.onClose}
-    >
-      <div
-        className="no-drag flex max-h-[88vh] w-full max-w-lg animate-pop-in flex-col overflow-hidden rounded-2xl border border-border-strong bg-surface shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* Modal header */}
-        <div className="flex items-center justify-between border-b border-border px-5 py-4">
-          <div>
-            <h2 className="text-sm font-semibold">Settings</h2>
-            <p className="text-[11px] text-muted">Configure your translation session</p>
-          </div>
-          <button
-            onClick={props.onClose}
-            className="grid h-7 w-7 place-items-center rounded-lg text-muted transition hover:bg-elevated hover:text-foreground"
-          >
-            <CloseIcon />
-          </button>
-        </div>
-
-        {/* Modal body */}
-        <div className="flex-1 space-y-5 overflow-y-auto px-5 py-5">
-          <Field label="Gemini API key" hint="Stored encrypted on this device via the OS keychain.">
-            <div className="flex gap-2">
-              <input
-                type="password"
-                value={props.apiKey}
-                onChange={(e) => props.setApiKey(e.target.value)}
-                placeholder="AIza…"
-                className="flex-1 rounded-lg border border-border bg-background px-3 py-2 text-sm outline-none transition focus:border-accent"
-              />
-              <button
-                onClick={props.saveKey}
-                className="rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-accent-fg transition hover:bg-accent-hover"
-              >
-                {props.keySaved ? 'Update' : 'Save'}
-              </button>
-            </div>
-          </Field>
-
-        </div>
-
-        {/* Modal footer */}
-        <div className="flex justify-end border-t border-border px-5 py-3">
-          <button
-            onClick={props.onClose}
-            className="rounded-lg border border-border bg-surface-2 px-4 py-2 text-sm font-medium text-foreground transition hover:bg-elevated"
-          >
-            Done
-          </button>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-/* =========================== Settings primitives =========================== */
-
-function Field(props: {
-  label: string
-  hint?: string
-  children: React.ReactNode
-}): React.JSX.Element {
-  return (
-    <div>
-      <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-[0.06em] text-muted">
-        {props.label}
-      </label>
-      {props.children}
-      {props.hint && <p className="mt-1.5 text-[11px] text-faint">{props.hint}</p>}
-    </div>
-  )
-}
+/* =========================== Controls =========================== */
 
 function Select(props: {
   value: string
   onChange: (v: string) => void
   children: React.ReactNode
+  className?: string
 }): React.JSX.Element {
   return (
-    <div className="relative">
+    <div className={`relative ${props.className ?? ''}`}>
       <select
         value={props.value}
         onChange={(e) => props.onChange(e.target.value)}
@@ -651,37 +722,6 @@ function Select(props: {
         <ChevronIcon />
       </span>
     </div>
-  )
-}
-
-function Toggle(props: {
-  checked: boolean
-  onChange: (v: boolean) => void
-  title: string
-  desc: string
-}): React.JSX.Element {
-  return (
-    <button
-      type="button"
-      onClick={() => props.onChange(!props.checked)}
-      className="flex w-full items-center justify-between gap-4 rounded-lg px-3 py-2.5 text-left transition hover:bg-surface-2"
-    >
-      <span>
-        <span className="block text-[13px] font-medium text-foreground">{props.title}</span>
-        <span className="block text-[11px] text-faint">{props.desc}</span>
-      </span>
-      <span
-        className={`relative h-5.5 w-9.5 shrink-0 rounded-full transition-colors ${
-          props.checked ? 'bg-accent' : 'bg-border-strong'
-        }`}
-      >
-        <span
-          className={`absolute top-0.5 h-4.5 w-4.5 rounded-full bg-white shadow transition-transform ${
-            props.checked ? 'translate-x-4.5' : 'translate-x-0.5'
-          }`}
-        />
-      </span>
-    </button>
   )
 }
 
@@ -701,6 +741,24 @@ function HeadphonesIcon(): React.JSX.Element {
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M3 14v-2a9 9 0 0 1 18 0v2" />
       <path d="M21 15a2 2 0 0 1-2 2h-1v-5h1a2 2 0 0 1 2 2zM3 15a2 2 0 0 0 2 2h1v-5H5a2 2 0 0 0-2 2z" />
+    </svg>
+  )
+}
+
+function SubtitlesIcon(): React.JSX.Element {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="2.5" y="5" width="19" height="14" rx="2.5" />
+      <path d="M6.5 14.5h6M15 14.5h2.5M6.5 11h2.5M11.5 11h6" />
+    </svg>
+  )
+}
+
+function HistoryIcon(): React.JSX.Element {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 12a9 9 0 1 0 3-6.7L3 8" />
+      <path d="M3 3v5h5M12 7v5l3 2" />
     </svg>
   )
 }
@@ -730,13 +788,6 @@ function StopIcon(): React.JSX.Element {
   )
 }
 
-function CloseIcon(): React.JSX.Element {
-  return (
-    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M18 6 6 18M6 6l12 12" />
-    </svg>
-  )
-}
 
 function ChevronIcon(): React.JSX.Element {
   return (
