@@ -1,6 +1,10 @@
 ## [0.1.13] — 2026-10-15
 
 ### Added
+- Floating subtitles window: transparent, always on top (also over full-screen video), shows the latest translated lines. Unlocked it can be moved, resized and styled (text size, 1–4 lines, show original); locked, clicks pass through to the app underneath. Position and style are remembered.
+- Global shortcuts that work in any app: Ctrl/Cmd+Shift+F7 starts/stops translation, Ctrl/Cmd+Shift+F8 shows/hides the subtitles window. Settings shows them and warns if another app has taken one.
+- Tray / menu-bar icon with Start/Stop, subtitles window toggle, show window and quit.
+- Ukrainian interface (follows the OS language by default; switchable in Settings), including tray menu, dialogs and error messages.
 - Second translation service: **Soniox** real-time translation (`stt-rt-v5`), selectable in Settings. It returns text directly (original and translation in one stream) instead of synthesized audio. The Soniox key is stored encrypted like the Gemini key; each connection uses a short-lived temporary key.
 - Translation services sit behind one provider interface, so capture, line pairing, history and export work the same for both.
 - Full language lists: 78 languages for Gemini, 60 for Soniox, with Ukrainian, Russian and English pinned at the top. Each provider gets its own codes (e.g. `zh-Hans` → `zh`, `fil` → `tl` for Soniox).
@@ -12,6 +16,7 @@
 - Unit tests for the line pairing and the text export (`bun test`).
 
 ### Fixed
+- The control bar fits narrow windows: controls shrink instead of overflowing, with a compact level meter and a shorter Start label.
 - Portuguese used the code `pt`, which Gemini Live Translate does not accept; it is now `pt-BR` / `pt-PT` (saved settings are migrated).
 - A failed capture start, an API error or a dropped connection no longer leaves the Gemini session open in the background. Every failure path now goes through one teardown that stops capture and closes the socket.
 - Audio captured while the session reconnects (goAway rotation or network loss) is buffered (up to 3 s) and sent once the new session is ready, instead of being dropped.

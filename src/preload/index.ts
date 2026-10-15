@@ -1,12 +1,27 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
 export type ProviderId = 'gemini' | 'soniox'
+export type UiLanguage = 'uk' | 'en'
+
+export type OverlaySettings = {
+  fontSize: number
+  lines: number
+  showOriginal: boolean
+  locked: boolean
+}
+export type OverlayLine = { source: string; target: string; open?: boolean }
+export type ShortcutInfo = {
+  translation: string
+  overlay: string
+  registered: { translation: boolean; overlay: boolean }
+}
 
 export type AppSettings = {
   hasApiKey: boolean
   hasSonioxKey: boolean
   provider: ProviderId
   echoTargetLanguage: boolean
+  uiLanguage: UiLanguage
   sourceLang: string
   targetLang: string
   audioSourceId: string
@@ -29,6 +44,12 @@ export type HistorySummary = Omit<HistoryRecord, 'segments'> & { segmentCount: n
 export type SaveTextResult = { ok: boolean; path?: string; canceled?: boolean; error?: string }
 
 export type LiveTokenResult = { ok: true; token: string } | { ok: false; error: string }
+
+function subscribe<T>(channel: string, cb: (payload: T) => void): () => void {
+  const listener = (_e: unknown, payload: T): void => cb(payload)
+  ipcRenderer.on(channel, listener)
+  return () => ipcRenderer.removeListener(channel, listener)
+}
 
 // Mirror of the main-process flag, so disabled logging costs no IPC round-trip at all.
 let debugEnabled = false
@@ -53,6 +74,7 @@ const api = {
     audioSourceId?: string
     provider?: ProviderId
     echoTargetLanguage?: boolean
+    uiLanguage?: UiLanguage
   }): Promise<boolean> => ipcRenderer.invoke('settings:setPrefs', prefs),
   // Short-lived Live API token minted by the main process; the API key never enters the renderer.
   createLiveToken: (): Promise<LiveTokenResult> => ipcRenderer.invoke('live:createToken'),
@@ -80,6 +102,27 @@ const api = {
     ipcRenderer.on('capture:pcm', listener)
     return () => ipcRenderer.removeListener('capture:pcm', listener)
   },
+  // Global shortcut / tray asked the main window to start or stop translation.
+  onToggleTranslationRequest: (cb: () => void): (() => void) => subscribe('hotkey:toggleTranslation', cb),
+  reportStatus: (running: boolean): void => ipcRenderer.send('app:status', { running }),
+  getShortcuts: (): Promise<ShortcutInfo> => ipcRenderer.invoke('shortcuts:get'),
+
+  // Floating subtitles window.
+  toggleOverlay: (): Promise<boolean> => ipcRenderer.invoke('overlay:toggle'),
+  hideOverlay: (): Promise<void> => ipcRenderer.invoke('overlay:hide'),
+  isOverlayVisible: (): Promise<boolean> => ipcRenderer.invoke('overlay:isVisible'),
+  getOverlaySettings: (): Promise<OverlaySettings> => ipcRenderer.invoke('overlay:getSettings'),
+  setOverlaySettings: (patch: Partial<OverlaySettings>): Promise<OverlaySettings> =>
+    ipcRenderer.invoke('overlay:setSettings', patch),
+  getOverlayLines: (): Promise<OverlayLine[]> => ipcRenderer.invoke('overlay:getLines'),
+  sendOverlayLines: (lines: OverlayLine[]): void => ipcRenderer.send('overlay:lines', lines),
+  setOverlayInteractive: (interactive: boolean): void => ipcRenderer.send('overlay:setInteractive', interactive),
+  resizeOverlay: (size: { width: number; height: number }): void => ipcRenderer.send('overlay:resize', size),
+  onOverlayLines: (cb: (lines: OverlayLine[]) => void): (() => void) => subscribe('overlay:lines', cb),
+  onOverlaySettings: (cb: (s: OverlaySettings) => void): (() => void) => subscribe('overlay:settings', cb),
+  onOverlayVisible: (cb: (visible: boolean) => void): (() => void) => subscribe('overlay:visible', cb),
+  onUiLanguage: (cb: (lang: UiLanguage) => void): (() => void) => subscribe('ui:language', cb),
+
   onCaptureError: (cb: (message: string) => void): (() => void) => {
     const listener = (_e: unknown, message: string): void => cb(message)
     ipcRenderer.on('capture:error', listener)

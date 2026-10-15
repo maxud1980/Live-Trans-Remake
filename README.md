@@ -19,6 +19,9 @@ Please see the original repository for the original project's description, docum
 
 The main changes in this remake:
 
+- **Floating subtitles window** — always on top of other apps, click-through when locked.
+- **Global shortcuts and tray icon** — Ctrl/Cmd+Shift+F7 start/stop, Ctrl/Cmd+Shift+F8 subtitles.
+- **Ukrainian and English interface.**
 - **Two translation services** — Gemini 3.5 Live Translate or Soniox real-time translation, switchable in Settings.
 - **Paired transcript, history and export** — each line next to its translation; sessions saved automatically; export to .txt.
 - **Subtitles-only workflow** — translated audio playback was removed. The app displays the original and translated speech as text.

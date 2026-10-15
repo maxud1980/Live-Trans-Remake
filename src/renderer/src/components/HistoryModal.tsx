@@ -3,6 +3,7 @@ import type { HistoryRecord, HistorySummary } from '../env'
 import { formatDateTime } from '../lib/segments'
 import { ExportMenu, langName } from './ExportMenu'
 import { Transcript, type TranscriptLine } from './Transcript'
+import { t } from '../lib/i18n'
 
 /** Past sessions: browse, re-read, export or delete. */
 export function HistoryModal(props: {
@@ -56,7 +57,7 @@ export function HistoryModal(props: {
     const rest = (items ?? []).filter((i) => i.id !== selectedId)
     setItems(rest)
     setSelectedId(rest[0]?.id ?? null)
-    setNotice('Session deleted.')
+    setNotice(t('sessionDeleted'))
   }
 
   function report(message: string): void {
@@ -77,13 +78,13 @@ export function HistoryModal(props: {
       >
         <div className="flex items-center justify-between border-b border-border px-5 py-4">
           <div>
-            <h2 className="text-sm font-semibold">History</h2>
-            <p className="text-[11px] text-muted">Saved automatically on this device</p>
+            <h2 className="text-sm font-semibold">{t('history')}</h2>
+            <p className="text-[11px] text-muted">{t('historySubtitle')}</p>
           </div>
           <button
             onClick={props.onClose}
             className="grid h-7 w-7 place-items-center rounded-lg text-muted transition hover:bg-elevated hover:text-foreground"
-            title="Close"
+            title={t('close')}
           >
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
               <path d="M18 6 6 18M6 6l12 12" />
@@ -95,9 +96,9 @@ export function HistoryModal(props: {
           {/* Session list */}
           <aside className="w-72 shrink-0 overflow-y-auto border-r border-border">
             {items === null ? (
-              <p className="p-4 text-[12px] text-faint">Loading…</p>
+              <p className="p-4 text-[12px] text-faint">{t('loading')}</p>
             ) : items.length === 0 ? (
-              <p className="p-4 text-[12px] text-faint">No sessions yet. Translations are saved here when you start one.</p>
+              <p className="p-4 text-[12px] text-faint">{t('noSessions')}</p>
             ) : (
               items.map((it) => (
                 <button
@@ -110,7 +111,7 @@ export function HistoryModal(props: {
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-[12px] font-medium text-foreground">{formatDateTime(it.startedAt)}</span>
                     <span className="text-[10px] text-faint">
-                      {it.id === props.activeSessionId ? 'recording' : `${it.segmentCount} lines`}
+                      {it.id === props.activeSessionId ? t('recording') : t('nLines', { n: it.segmentCount })}
                     </span>
                   </div>
                   <div className="mt-0.5 text-[11px] text-muted">
@@ -132,8 +133,8 @@ export function HistoryModal(props: {
                       {formatDateTime(record.startedAt)} · {langName(record.sourceLang)} → {langName(record.targetLang)}
                     </p>
                     <p className="truncate text-[11px] text-faint">
-                      {record.audioSource} · {record.segments.length} lines
-                      {recording ? ' · still recording' : ''}
+                      {record.audioSource} · {t('nLines', { n: record.segments.length })}
+                      {recording ? ` · ${t('stillRecording')}` : ''}
                     </p>
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
@@ -147,21 +148,21 @@ export function HistoryModal(props: {
                           : 'border-border bg-surface text-muted hover:border-border-strong hover:text-red-300'
                       }`}
                     >
-                      {confirmDelete ? 'Click again to delete' : 'Delete'}
+                      {confirmDelete ? t('confirmDelete') : t('delete')}
                     </button>
                   </div>
                 </div>
                 <Transcript
                   lines={lines}
                   sourceTitle={langName(record.sourceLang)}
-                  targetTitle={`Translation · ${langName(record.targetLang)}`}
+                  targetTitle={t('translationColumn', { lang: langName(record.targetLang) })}
                   live={false}
-                  emptyText="This session has no lines."
+                  emptyText={t('sessionEmpty')}
                 />
               </>
             ) : (
               <div className="flex flex-1 items-center justify-center text-[13px] text-faint">
-                {items && items.length ? 'Loading…' : ''}
+                {items && items.length ? t('loading') : ''}
               </div>
             )}
             {notice && <p className="text-[11px] text-faint">{notice}</p>}

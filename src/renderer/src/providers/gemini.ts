@@ -1,3 +1,4 @@
+import { t } from '../lib/i18n'
 import { providerCode, fromProviderCode } from '../lib/languages'
 import {
   AudioBacklog,
@@ -112,7 +113,7 @@ export class GeminiProvider implements TranslationProvider {
         this.handleMessage(JSON.parse(raw) as Record<string, any>, handlers)
       } catch (err) {
         void window.api.debugLog('gemini.websocket.parse-error', { error: String(err) })
-        handlers.onError(`Failed to parse server message: ${String(err)}`)
+        handlers.onError(t('parseError', { message: String(err) }))
       }
     }
 
@@ -132,7 +133,7 @@ export class GeminiProvider implements TranslationProvider {
       // A session that never became ready is almost always a configuration problem
       // (key, model access, quota). Retrying it eight times just hides the error.
       if (!this.hasReadyOnce) {
-        const reason = ev.reason || 'Could not open a translation session — check your API key, network and model access.'
+        const reason = ev.reason || t('sessionOpenFailed')
         handlers.onError(reason)
         handlers.onClose({ code: ev.code, reason })
         return
@@ -160,8 +161,8 @@ export class GeminiProvider implements TranslationProvider {
       handlers.onClose({
         code: ev.code,
         reason: ev.reason
-          ? `${ev.reason} (gave up after ${MAX_RECONNECT_ATTEMPTS} reconnect attempts)`
-          : `gave up after ${MAX_RECONNECT_ATTEMPTS} reconnect attempts`
+          ? `${ev.reason} (${t('gaveUp', { n: MAX_RECONNECT_ATTEMPTS })})`
+          : t('gaveUp', { n: MAX_RECONNECT_ATTEMPTS })
       })
       return
     }
@@ -221,7 +222,7 @@ export class GeminiProvider implements TranslationProvider {
     if (msg.error) {
       const e = msg.error
       void window.api.debugLog('gemini.api-error', e)
-      handlers.onError(`API error ${e.code ?? ''}: ${e.message ?? JSON.stringify(e)}`)
+      handlers.onError(t('apiError', { code: e.code ?? '', message: e.message ?? JSON.stringify(e) }))
     }
   }
 

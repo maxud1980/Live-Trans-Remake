@@ -1,3 +1,4 @@
+import { t } from '../lib/i18n'
 export type MicrophoneHandlers = {
   onChunk: (base64Pcm: string) => void
   onLevel: (rms: number) => void
@@ -70,7 +71,7 @@ export class MicrophoneAudioCapture {
       })
       const track = this.stream.getAudioTracks()[0]
       void window.api.debugLog('microphone.stream', { label: track?.label, settings: track?.getSettings() })
-      track?.addEventListener('ended', () => handlers.onError('The microphone was disconnected.'))
+      track?.addEventListener('ended', () => handlers.onError(t('micDisconnected')))
 
       // Chromium resamples the device rate to 16 kHz for us.
       this.ctx = new AudioContext({ sampleRate: 16000 })
@@ -104,7 +105,7 @@ export class MicrophoneAudioCapture {
       await this.stop()
       const message =
         err instanceof DOMException && err.name === 'NotAllowedError'
-          ? 'Microphone permission was denied.'
+          ? t('micDenied')
           : err instanceof Error
             ? err.message
             : String(err)

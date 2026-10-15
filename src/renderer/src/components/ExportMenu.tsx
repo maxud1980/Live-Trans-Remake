@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { formatTxt, type ExportMode, type SessionRecord } from '../lib/segments'
 import { shortLabel } from '../lib/languages'
+import { t, type StringKey } from '../lib/i18n'
 
 export function langName(code: string): string {
-  return code === 'auto' ? 'Auto-detect' : shortLabel(code)
+  return code === 'auto' ? t('autoDetect') : shortLabel(code)
 }
 
 type ExportSource = Pick<SessionRecord, 'startedAt' | 'endedAt' | 'sourceLang' | 'targetLang' | 'segments'>
@@ -16,10 +17,10 @@ function fileName(s: ExportSource, mode: ExportMode): string {
   return `live-trans_${stamp}_${suffix}.txt`
 }
 
-const OPTIONS: { mode: ExportMode; label: string }[] = [
-  { mode: 'both', label: 'Original + translation' },
-  { mode: 'target', label: 'Translation only' },
-  { mode: 'source', label: 'Original only' }
+const OPTIONS: { mode: ExportMode; label: StringKey }[] = [
+  { mode: 'both', label: 'exportBoth' },
+  { mode: 'target', label: 'exportTarget' },
+  { mode: 'source', label: 'exportSource' }
 ]
 
 /** Save-as-TXT and copy actions for a session (the live one or one from History). */
@@ -58,19 +59,19 @@ export function ExportMenu(props: {
 
   async function save(mode: ExportMode): Promise<void> {
     setOpen(false)
-    const t = text(mode)
-    if (!t) return props.onResult('Nothing to export yet.')
-    const res = await window.api.saveTextFile(fileName(t.s, mode), t.body)
-    if (res.ok) props.onResult(`Exported to ${res.path}`)
-    else if (!res.canceled) props.onResult(`Export failed: ${res.error ?? 'unknown error'}`)
+    const out = text(mode)
+    if (!out) return props.onResult(t('nothingToExport'))
+    const res = await window.api.saveTextFile(fileName(out.s, mode), out.body)
+    if (res.ok) props.onResult(t('exportedTo', { path: res.path ?? '' }))
+    else if (!res.canceled) props.onResult(t('exportFailed', { message: res.error ?? t('unknownError') }))
   }
 
   async function copy(mode: ExportMode): Promise<void> {
     setOpen(false)
-    const t = text(mode)
-    if (!t) return props.onResult('Nothing to copy yet.')
-    await window.api.copyText(t.body)
-    props.onResult('Copied to clipboard.')
+    const out = text(mode)
+    if (!out) return props.onResult(t('nothingToCopy'))
+    await window.api.copyText(out.body)
+    props.onResult(t('copied'))
   }
 
   return (
@@ -82,7 +83,7 @@ export function ExportMenu(props: {
           props.compact ? 'h-8 px-2.5 text-[12px]' : 'h-10 px-3 text-[13px]'
         }`}
       >
-        <DownloadIcon /> Export
+        <DownloadIcon /> {t('export')}
       </button>
       {open && (
         <div
@@ -90,29 +91,29 @@ export function ExportMenu(props: {
             props.align === 'left' ? 'left-0' : 'right-0'
           } ${props.direction === 'down' ? (props.compact ? 'top-10' : 'top-12') : 'bottom-12'}`}
         >
-          <p className="px-3 pb-1 pt-2.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-faint">Save as .txt</p>
+          <p className="px-3 pb-1 pt-2.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-faint">{t('saveAsTxt')}</p>
           {OPTIONS.map((o) => (
             <button
               key={o.mode}
               onClick={() => void save(o.mode)}
               className="block w-full px-3 py-2 text-left text-[13px] text-foreground transition hover:bg-elevated"
             >
-              {o.label}
+              {t(o.label)}
             </button>
           ))}
           <div className="my-1 border-t border-border" />
-          <p className="px-3 pb-1 pt-1.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-faint">Copy</p>
+          <p className="px-3 pb-1 pt-1.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-faint">{t('copy')}</p>
           <button
             onClick={() => void copy('both')}
             className="block w-full px-3 py-2 text-left text-[13px] text-foreground transition hover:bg-elevated"
           >
-            Original + translation
+            {t('exportBoth')}
           </button>
           <button
             onClick={() => void copy('target')}
             className="mb-1 block w-full px-3 py-2 text-left text-[13px] text-foreground transition hover:bg-elevated"
           >
-            Translation only
+            {t('exportTarget')}
           </button>
         </div>
       )}

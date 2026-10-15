@@ -1,12 +1,27 @@
 /// <reference types="vite/client" />
 
 export type ProviderId = 'gemini' | 'soniox'
+export type UiLanguage = 'uk' | 'en'
+
+export type OverlaySettings = {
+  fontSize: number
+  lines: number
+  showOriginal: boolean
+  locked: boolean
+}
+export type OverlayLine = { source: string; target: string; open?: boolean }
+export type ShortcutInfo = {
+  translation: string
+  overlay: string
+  registered: { translation: boolean; overlay: boolean }
+}
 
 export type AppSettings = {
   hasApiKey: boolean
   hasSonioxKey: boolean
   provider: ProviderId
   echoTargetLanguage: boolean
+  uiLanguage: UiLanguage
   sourceLang: string
   targetLang: string
   audioSourceId: string
@@ -43,6 +58,7 @@ export interface PreloadApi {
     audioSourceId?: string
     provider?: ProviderId
     echoTargetLanguage?: boolean
+    uiLanguage?: UiLanguage
   }) => Promise<boolean>
   createLiveToken: () => Promise<LiveTokenResult>
   setSonioxKey: (key: string) => Promise<boolean>
@@ -60,6 +76,22 @@ export interface PreloadApi {
   stopCapture: () => Promise<boolean>
   onCapturePcm: (cb: (frame: { b64: string; rms: number }) => void) => () => void
   onCaptureError: (cb: (message: string) => void) => () => void
+  onToggleTranslationRequest: (cb: () => void) => () => void
+  reportStatus: (running: boolean) => void
+  getShortcuts: () => Promise<ShortcutInfo>
+  toggleOverlay: () => Promise<boolean>
+  hideOverlay: () => Promise<void>
+  isOverlayVisible: () => Promise<boolean>
+  getOverlaySettings: () => Promise<OverlaySettings>
+  setOverlaySettings: (patch: Partial<OverlaySettings>) => Promise<OverlaySettings>
+  getOverlayLines: () => Promise<OverlayLine[]>
+  sendOverlayLines: (lines: OverlayLine[]) => void
+  setOverlayInteractive: (interactive: boolean) => void
+  resizeOverlay: (size: { width: number; height: number }) => void
+  onOverlayLines: (cb: (lines: OverlayLine[]) => void) => () => void
+  onOverlaySettings: (cb: (s: OverlaySettings) => void) => () => void
+  onOverlayVisible: (cb: (visible: boolean) => void) => () => void
+  onUiLanguage: (cb: (lang: UiLanguage) => void) => () => void
 }
 
 declare global {

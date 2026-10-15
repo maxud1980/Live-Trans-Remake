@@ -1,9 +1,12 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, net, safeStorage, shell, session, systemPreferences } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, net, safeStorage, shell, session, systemPreferences } from 'electron'
 import { join, dirname } from 'node:path'
 import { appendFileSync, existsSync, mkdirSync } from 'node:fs'
 import { readdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { spawn, execSync, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import Store from 'electron-store'
+import { OVERLAY_DEFAULTS, OverlayController, type OverlaySettings } from './overlay'
+import { AppTray } from './tray'
+import { mainText, resolveUiLanguage, type MainStringKey, type UiLanguage } from './strings'
 
 type ProviderId = 'gemini' | 'soniox'
 
@@ -16,6 +19,8 @@ type Persisted = {
   audioSourceId: string
   echoTargetLanguage: boolean
   debugLogging: boolean
+  uiLanguage?: UiLanguage
+  overlay: OverlaySettings
 }
 
 const store = new Store<Persisted>({
@@ -25,7 +30,8 @@ const store = new Store<Persisted>({
     audioSourceId: '__system_audio__',
     provider: 'gemini',
     echoTargetLanguage: false,
-    debugLogging: false
+    debugLogging: false,
+    overlay: OVERLAY_DEFAULTS
   }
 })
 
@@ -136,6 +142,10 @@ function createWindow(): void {
 
   win.on('closed', () => {
     if (mainWindow === win) mainWindow = null
+    // The overlay and tray belong to the main window's session; without them the app can
+    // quit normally (window-all-closed) instead of lingering with an orphan overlay.
+    overlay?.destroy()
+    if (process.platform !== 'darwin') tray?.destroy()
   })
 
   win.webContents.on('console-message', (_event, level, message, line, sourceId) => {
@@ -147,12 +157,67 @@ function createWindow(): void {
     return { action: 'deny' }
   })
 
+  loadRenderer(win)
+}
+
+// The main window and the subtitles overlay share one renderer bundle; the hash picks the view.
+function loadRenderer(win: BrowserWindow, hash = ''): void {
   if (process.env['ELECTRON_RENDERER_URL']) {
-    win.loadURL(process.env['ELECTRON_RENDERER_URL'])
+    win.loadURL(process.env['ELECTRON_RENDERER_URL'] + (hash ? `#${hash}` : ''))
   } else {
-    win.loadFile(join(__dirname, '../renderer/index.html'))
+    win.loadFile(join(__dirname, '../renderer/index.html'), hash ? { hash } : undefined)
   }
 }
+
+// ---- UI language, subtitles overlay, tray and global shortcuts ----
+let uiLanguage: UiLanguage = 'en'
+const t = (key: MainStringKey, params?: Record<string, string>): string => mainText(uiLanguage, key, params)
+
+// Ctrl/Cmd+Shift+F7/F8: function-key combinations are rarely taken by other apps, so a global
+// registration does not steal common shortcuts (Ctrl+Shift+T reopens browser tabs, etc.).
+const SHORTCUTS = { translation: 'CommandOrControl+Shift+F7', overlay: 'CommandOrControl+Shift+F8' }
+const shortcutStatus = { translation: false, overlay: false }
+
+let overlay: OverlayController | null = null
+let tray: AppTray | null = null
+
+function trayLabels() {
+  return {
+    show: t('trayShow'),
+    start: t('trayStart'),
+    stop: t('trayStop'),
+    showSubtitles: t('trayShowSubtitles'),
+    hideSubtitles: t('trayHideSubtitles'),
+    quit: t('trayQuit'),
+    tooltipIdle: t('trayIdle'),
+    tooltipRunning: t('trayRunning')
+  }
+}
+
+function showMainWindow(): void {
+  if (!mainWindow) createWindow()
+  else {
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.show()
+    mainWindow.focus()
+  }
+}
+
+function requestToggleTranslation(): void {
+  // Start/stop lives in the main window's renderer (it owns capture and the session).
+  if (!mainWindow) return showMainWindow()
+  mainWindow.webContents.send('hotkey:toggleTranslation')
+}
+
+function registerShortcuts(): void {
+  globalShortcut.unregisterAll()
+  shortcutStatus.translation = globalShortcut.register(SHORTCUTS.translation, requestToggleTranslation)
+  shortcutStatus.overlay = globalShortcut.register(SHORTCUTS.overlay, () => overlay?.toggle())
+  debugLog('shortcuts', shortcutStatus)
+}
+
+ipcMain.handle('shortcuts:get', () => ({ ...SHORTCUTS, registered: { ...shortcutStatus } }))
+ipcMain.on('app:status', (_e, status: { running: boolean }) => tray?.setRunning(!!status?.running))
 
 // ---- System audio capture (per-platform loopback tap) ----
 // We capture the WHOLE system output EXCEPT our own Electron process tree, so the model never
@@ -402,6 +467,7 @@ ipcMain.handle('settings:get', () => ({
   hasSonioxKey: !!getSecret('sonioxKeyEnc'),
   provider: store.get('provider'),
   echoTargetLanguage: store.get('echoTargetLanguage'),
+  uiLanguage,
   sourceLang: store.get('sourceLang'),
   targetLang: store.get('targetLang'),
   audioSourceId: store.get('audioSourceId'),
@@ -418,7 +484,7 @@ ipcMain.handle('settings:setSonioxKey', (_e, key: string) => setSecret('sonioxKe
 const SONIOX_TEMP_KEY_URL = 'https://api.soniox.com/v1/auth/temporary-api-key'
 ipcMain.handle('soniox:createToken', async (): Promise<{ ok: true; token: string } | { ok: false; error: string }> => {
   const apiKey = getSecret('sonioxKeyEnc')
-  if (!apiKey) return { ok: false, error: 'Enter your Soniox API key in Settings first.' }
+  if (!apiKey) return { ok: false, error: t('sonioxKeyMissing') }
   try {
     const res = await net.fetch(SONIOX_TEMP_KEY_URL, {
       method: 'POST',
@@ -440,13 +506,13 @@ ipcMain.handle('soniox:createToken', async (): Promise<{ ok: true; token: string
     if (!res.ok || !token) {
       const detail = body.error_message || body.message || `HTTP ${res.status}`
       debugLog('soniox-token-error', { status: res.status, detail })
-      return { ok: false, error: `Could not create a Soniox session key: ${detail}` }
+      return { ok: false, error: t('sonioxTokenFailed', { detail }) }
     }
     return { ok: true, token }
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err)
     debugLog('soniox-token-network-error', { detail })
-    return { ok: false, error: `Could not reach Soniox: ${detail}` }
+    return { ok: false, error: t('sonioxUnreachable', { detail }) }
   }
 })
 
@@ -455,7 +521,7 @@ ipcMain.handle('soniox:createToken', async (): Promise<{ ok: true; token: string
 const AUTH_TOKENS_URL = 'https://generativelanguage.googleapis.com/v1beta/auth_tokens'
 ipcMain.handle('live:createToken', async (): Promise<{ ok: true; token: string } | { ok: false; error: string }> => {
   const apiKey = getApiKey()
-  if (!apiKey) return { ok: false, error: 'Enter your Gemini API key in Settings first.' }
+  if (!apiKey) return { ok: false, error: t('geminiKeyMissing') }
   const now = Date.now()
   try {
     const res = await net.fetch(AUTH_TOKENS_URL, {
@@ -471,13 +537,13 @@ ipcMain.handle('live:createToken', async (): Promise<{ ok: true; token: string }
     if (!res.ok || !body.name) {
       const detail = body.error?.message || `HTTP ${res.status}`
       debugLog('live-token-error', { status: res.status, detail })
-      return { ok: false, error: `Could not create a session token: ${detail}` }
+      return { ok: false, error: t('geminiTokenFailed', { detail }) }
     }
     return { ok: true, token: body.name }
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err)
     debugLog('live-token-network-error', { detail })
-    return { ok: false, error: `Could not reach the Gemini API: ${detail}` }
+    return { ok: false, error: t('geminiUnreachable', { detail }) }
   }
 })
 
@@ -538,6 +604,12 @@ ipcMain.handle('settings:setPrefs', (_e, prefs: Partial<Persisted>) => {
   if (typeof prefs.audioSourceId === 'string') store.set('audioSourceId', prefs.audioSourceId)
   if (prefs.provider === 'gemini' || prefs.provider === 'soniox') store.set('provider', prefs.provider)
   if (typeof prefs.echoTargetLanguage === 'boolean') store.set('echoTargetLanguage', prefs.echoTargetLanguage)
+  if (prefs.uiLanguage === 'uk' || prefs.uiLanguage === 'en') {
+    store.set('uiLanguage', prefs.uiLanguage)
+    uiLanguage = prefs.uiLanguage
+    tray?.setLabels(trayLabels())
+    for (const w of BrowserWindow.getAllWindows()) w.webContents.send('ui:language', uiLanguage)
+  }
   return true
 })
 
@@ -639,9 +711,9 @@ ipcMain.handle('history:delete', async (_e, id: string) => {
 ipcMain.handle('export:saveText', async (_e, defaultName: string, content: string) => {
   const safeName = String(defaultName).replace(/[\\/:*?"<>|]+/g, '-').slice(0, 120) || 'live-trans.txt'
   const options = {
-    title: 'Export transcript',
+    title: t('exportTitle'),
     defaultPath: join(app.getPath('documents'), safeName),
-    filters: [{ name: 'Text', extensions: ['txt'] }]
+    filters: [{ name: t('exportFilter'), extensions: ['txt'] }]
   }
   const res = mainWindow ? await dialog.showSaveDialog(mainWindow, options) : await dialog.showSaveDialog(options)
   if (res.canceled || !res.filePath) return { ok: false, canceled: true }
@@ -687,7 +759,27 @@ app.whenReady().then(() => {
     callback(wantsAudio)
   })
 
+  uiLanguage = resolveUiLanguage(store.get('uiLanguage'), app.getLocale())
+
   createWindow()
+
+  overlay = new OverlayController({
+    preloadPath: join(__dirname, '../preload/index.js'),
+    load: loadRenderer,
+    getSettings: () => store.get('overlay'),
+    saveSettings: (s) => store.set('overlay', s),
+    getMainWindow: () => mainWindow,
+    onVisibilityChange: (v) => tray?.setOverlayVisible(v)
+  })
+
+  tray = new AppTray({
+    onShowWindow: showMainWindow,
+    onToggleTranslation: requestToggleTranslation,
+    onToggleOverlay: () => overlay?.toggle(),
+    onQuit: () => app.quit()
+  })
+  tray.create(trayLabels(), SHORTCUTS)
+  registerShortcuts()
 
   // Do not start the native system-audio helper at application startup.
   // It owns a separate Core Audio/TCC path and can interfere with microphone
@@ -695,9 +787,11 @@ app.whenReady().then(() => {
   debugLog('capture-startup-skipped', { reason: 'lazy-start' })
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    if (!mainWindow) createWindow()
   })
 })
+
+app.on('will-quit', () => globalShortcut.unregisterAll())
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()

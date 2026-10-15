@@ -1,3 +1,4 @@
+import { t } from '../lib/i18n'
 import { fromProviderCode, providerCode } from '../lib/languages'
 import {
   AudioBacklog,
@@ -78,7 +79,7 @@ export class SonioxProvider implements TranslationProvider {
 
     const target = providerCode('soniox', config.targetLanguageCode)
     if (!target) {
-      const msg = 'Soniox does not support the selected target language. Choose another one.'
+      const msg = t('sonioxUnsupportedTarget')
       handlers.onError(msg)
       handlers.onClose({ code: 0, reason: msg })
       return
@@ -139,7 +140,7 @@ export class SonioxProvider implements TranslationProvider {
         this.handleMessage(JSON.parse(ev.data) as SonioxResponse, config, handlers)
       } catch (err) {
         void window.api.debugLog('soniox.parse-error', { error: String(err) })
-        handlers.onError(`Failed to parse Soniox message: ${String(err)}`)
+        handlers.onError(t('parseError', { message: String(err) }))
       }
     }
 
@@ -152,7 +153,7 @@ export class SonioxProvider implements TranslationProvider {
       if (this.ws === ws) this.ws = null
       if (this.closedByUser) return
       if (!this.hasReadyOnce) {
-        const reason = ev.reason || 'Could not open a Soniox session — check your Soniox API key and network.'
+        const reason = ev.reason || t('sonioxOpenFailed')
         handlers.onError(reason)
         handlers.onClose({ code: ev.code, reason })
         return
@@ -164,7 +165,7 @@ export class SonioxProvider implements TranslationProvider {
   private handleMessage(msg: SonioxResponse, config: LiveConfig, handlers: LiveHandlers): void {
     if (msg.error_code) {
       void window.api.debugLog('soniox.api-error', msg)
-      handlers.onError(`Soniox error ${msg.error_code}: ${msg.error_message ?? msg.error_type ?? 'unknown error'}`)
+      handlers.onError(t('sonioxError', { code: msg.error_code, message: msg.error_message ?? msg.error_type ?? t('unknownError') }))
       return
     }
     for (const t of msg.tokens ?? []) {
@@ -200,8 +201,8 @@ export class SonioxProvider implements TranslationProvider {
       handlers.onClose({
         code: ev.code,
         reason: ev.reason
-          ? `${ev.reason} (gave up after ${MAX_RECONNECT_ATTEMPTS} reconnect attempts)`
-          : `gave up after ${MAX_RECONNECT_ATTEMPTS} reconnect attempts`
+          ? `${ev.reason} (${t('gaveUp', { n: MAX_RECONNECT_ATTEMPTS })})`
+          : t('gaveUp', { n: MAX_RECONNECT_ATTEMPTS })
       })
       return
     }

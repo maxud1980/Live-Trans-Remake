@@ -91,3 +91,23 @@ body {
 .animate-pop-in {
   animation: pop-in 0.18s cubic-bezier(0.16, 1, 0.3, 1);
 }
+
+/* ---- Floating subtitles window ---- */
+html.overlay,
+html.overlay body {
+  background: transparent !important;
+  overflow: hidden;
+}
+.overlay-drag {
+  -webkit-app-region: drag;
+  cursor: move;
+}
+.overlay-no-drag {
+  -webkit-app-region: no-drag;
+}
+/* Readable over any video: soft dark halo instead of a hard outline. */
+.overlay-text p {
+  text-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.9),
+    0 0 12px rgba(0, 0, 0, 0.6);
+}

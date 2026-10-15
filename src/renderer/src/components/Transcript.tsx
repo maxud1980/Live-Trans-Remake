@@ -1,4 +1,5 @@
 import { memo, useLayoutEffect, useRef } from 'react'
+import { t } from '../lib/i18n'
 
 export type TranscriptLine = { id: number; source: string; target: string; open?: boolean }
 
@@ -41,7 +42,7 @@ export function Transcript(props: {
             {props.live && (
               <span className="flex items-center gap-1.5 text-[10px] text-faint">
                 <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
-                live
+                {t('live')}
               </span>
             )}
             {props.actions}
@@ -64,7 +65,7 @@ export function Transcript(props: {
           <>
             {hidden > 0 && (
               <p className="py-2 text-center text-[11px] text-faint">
-                {hidden} earlier lines are kept in History and exports.
+                {t('earlierLines', { n: hidden })}
               </p>
             )}
             {visible.map((line) => (
