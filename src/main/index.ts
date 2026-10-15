@@ -1,6 +1,7 @@
-import { app, BrowserWindow, ipcMain, net, safeStorage, shell, session, systemPreferences } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, net, safeStorage, shell, session, systemPreferences } from 'electron'
 import { join, dirname } from 'node:path'
 import { appendFileSync, existsSync, mkdirSync } from 'node:fs'
+import { readdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { spawn, execSync, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import Store from 'electron-store'
 
@@ -482,6 +483,123 @@ ipcMain.handle('settings:setPrefs', (_e, prefs: Partial<Persisted>) => {
   if (typeof prefs.sourceLang === 'string') store.set('sourceLang', prefs.sourceLang)
   if (typeof prefs.targetLang === 'string') store.set('targetLang', prefs.targetLang)
   if (typeof prefs.audioSourceId === 'string') store.set('audioSourceId', prefs.audioSourceId)
+  return true
+})
+
+// ---- Session history ----
+// One JSON file per session in userData/history. The renderer saves the running session
+// periodically and on stop, so a crash loses at most a few seconds of transcript.
+type HistorySegment = { source: string; target: string }
+type HistoryRecord = {
+  id: string
+  startedAt: number
+  endedAt: number
+  sourceLang: string
+  targetLang: string
+  audioSource: string
+  segments: HistorySegment[]
+}
+
+const historyDir = join(app.getPath('userData'), 'history')
+const HISTORY_ID = /^[A-Za-z0-9-]{1,64}$/
+
+function historyPath(id: string): string | null {
+  return HISTORY_ID.test(id) ? join(historyDir, `${id}.json`) : null
+}
+
+function sanitizeRecord(r: unknown): HistoryRecord | null {
+  if (!r || typeof r !== 'object') return null
+  const o = r as Record<string, unknown>
+  if (typeof o.id !== 'string' || !HISTORY_ID.test(o.id) || !Array.isArray(o.segments)) return null
+  return {
+    id: o.id,
+    startedAt: Number(o.startedAt) || 0,
+    endedAt: Number(o.endedAt) || 0,
+    sourceLang: String(o.sourceLang ?? ''),
+    targetLang: String(o.targetLang ?? ''),
+    audioSource: String(o.audioSource ?? ''),
+    segments: o.segments.map((s) => ({
+      source: String((s as HistorySegment)?.source ?? ''),
+      target: String((s as HistorySegment)?.target ?? '')
+    }))
+  }
+}
+
+ipcMain.handle('history:save', async (_e, raw: unknown) => {
+  const record = sanitizeRecord(raw)
+  const path = record && historyPath(record.id)
+  if (!record || !path) return false
+  try {
+    mkdirSync(historyDir, { recursive: true })
+    // Write-then-rename so an interrupted write never leaves a truncated session file.
+    const tmp = `${path}.tmp`
+    await writeFile(tmp, JSON.stringify(record), 'utf8')
+    await rename(tmp, path)
+    return true
+  } catch (err) {
+    debugLog('history-save-error', { error: String(err) })
+    return false
+  }
+})
+
+ipcMain.handle('history:list', async () => {
+  let files: string[] = []
+  try {
+    files = (await readdir(historyDir)).filter((f) => f.endsWith('.json'))
+  } catch {
+    return []
+  }
+  const out = []
+  for (const f of files) {
+    try {
+      const record = sanitizeRecord(JSON.parse(await readFile(join(historyDir, f), 'utf8')))
+      if (!record) continue
+      const { segments, ...meta } = record
+      const first = segments.find((s) => s.target || s.source)
+      out.push({ ...meta, segmentCount: segments.length, preview: (first?.target || first?.source || '').slice(0, 140) })
+    } catch {
+      // Skip unreadable files rather than failing the whole list.
+    }
+  }
+  return out.sort((a, b) => b.startedAt - a.startedAt)
+})
+
+ipcMain.handle('history:get', async (_e, id: string) => {
+  const path = historyPath(String(id))
+  if (!path) return null
+  try {
+    return sanitizeRecord(JSON.parse(await readFile(path, 'utf8')))
+  } catch {
+    return null
+  }
+})
+
+ipcMain.handle('history:delete', async (_e, id: string) => {
+  const path = historyPath(String(id))
+  if (!path) return false
+  await rm(path, { force: true })
+  return true
+})
+
+ipcMain.handle('export:saveText', async (_e, defaultName: string, content: string) => {
+  const safeName = String(defaultName).replace(/[\\/:*?"<>|]+/g, '-').slice(0, 120) || 'live-trans.txt'
+  const options = {
+    title: 'Export transcript',
+    defaultPath: join(app.getPath('documents'), safeName),
+    filters: [{ name: 'Text', extensions: ['txt'] }]
+  }
+  const res = mainWindow ? await dialog.showSaveDialog(mainWindow, options) : await dialog.showSaveDialog(options)
+  if (res.canceled || !res.filePath) return { ok: false, canceled: true }
+  try {
+    await writeFile(res.filePath, String(content), 'utf8')
+    return { ok: true, path: res.filePath }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) }
+  }
+})
+
+ipcMain.handle('clipboard:writeText', (_e, text: string) => {
+  clipboard.writeText(String(text))
   return true
 })
 

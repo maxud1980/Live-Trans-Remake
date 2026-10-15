@@ -1,20 +1,23 @@
-import { memo, useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { LANGUAGES, shortLabel } from './lib/languages'
 import { SystemAudioCapture } from './audio/capture'
 import { MicrophoneAudioCapture } from './audio/microphone'
 import { LiveTranslateClient } from './gemini/liveClient'
+import { Segmenter, newSessionId, type Segment, type SessionRecord } from './lib/segments'
+import { Transcript } from './components/Transcript'
+import { ExportMenu } from './components/ExportMenu'
+import { HistoryModal } from './components/HistoryModal'
 
 type Status = 'idle' | 'connecting' | 'listening' | 'error'
 type AudioDevice = { deviceId: string; label: string }
 const SYSTEM_AUDIO_ID = '__system_audio__'
 
-// Transcripts stream for the whole length of a video; cap the retained text so a long
-// session can't grow an unbounded string that re-renders slower and slower.
-const MAX_TRANSCRIPT_CHARS = 8000
-function appendCapped(prev: string, addition: string): string {
-  const next = prev + addition
-  return next.length > MAX_TRANSCRIPT_CHARS ? next.slice(next.length - MAX_TRANSCRIPT_CHARS) : next
-}
+// How often pause-based line breaks are checked, and how often a running session is
+// written to History (so a crash loses at most this much transcript).
+const SEGMENT_TICK_MS = 500
+const AUTOSAVE_MS = 10_000
+
+type SessionMeta = Omit<SessionRecord, 'segments' | 'endedAt'>
 
 const STATUS_LABEL: Record<Status, string> = {
   idle: 'Idle',
@@ -36,11 +39,10 @@ export default function App(): React.JSX.Element {
   const [message, setMessage] = useState('')
   const [level, setLevel] = useState(0)
 
-  // Transcripts arrive as incremental deltas (small fragments), so we append them.
-  // turnComplete is rare/absent for this model; we add a line break when it does arrive.
-  const [original, setOriginal] = useState('')
-  const [translated, setTranslated] = useState('')
+  // Transcript deltas are grouped into paired lines (original ↔ translation) by the segmenter.
+  const [segments, setSegments] = useState<Segment[]>([])
   const [showSettings, setShowSettings] = useState(true)
+  const [showHistory, setShowHistory] = useState(false)
   // macOS uses a hidden-inset title bar (content slides under the traffic lights); Windows/Linux
   // keep the native frame, so we only reserve the traffic-light strip on macOS.
   const [isMac, setIsMac] = useState(false)
@@ -52,8 +54,10 @@ export default function App(): React.JSX.Element {
   // Incremented on every start/stop; callbacks from an older session check it and bail out.
   const sessionRef = useRef(0)
   const microphonePrimeRef = useRef<Promise<boolean> | null>(null)
-  const origRef = useRef<HTMLDivElement | null>(null)
-  const transRef = useRef<HTMLDivElement | null>(null)
+  const segmenterRef = useRef(new Segmenter())
+  // Metadata of the current (or most recently finished) session, for autosave and export.
+  const sessionMetaRef = useRef<SessionMeta | null>(null)
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
 
   const running = status === 'connecting' || status === 'listening'
   const targetName = shortLabel(targetLang)
@@ -112,13 +116,36 @@ export default function App(): React.JSX.Element {
     }
   }, [])
 
-  // auto-scroll transcripts
+  // While a session runs: close lines after a pause, and autosave it to History.
   useEffect(() => {
-    origRef.current?.scrollTo({ top: origRef.current.scrollHeight })
-  }, [original])
-  useEffect(() => {
-    transRef.current?.scrollTo({ top: transRef.current.scrollHeight })
-  }, [translated])
+    if (!running) return
+    const tick = setInterval(() => {
+      if (segmenterRef.current.tick(Date.now())) setSegments(segmenterRef.current.segments)
+    }, SEGMENT_TICK_MS)
+    const save = setInterval(() => void saveSession(), AUTOSAVE_MS)
+    return () => {
+      clearInterval(tick)
+      clearInterval(save)
+    }
+  }, [running])
+
+  function sessionRecord(): SessionRecord | null {
+    const meta = sessionMetaRef.current
+    if (!meta) return null
+    const lines = segmenterRef.current.segments
+      .map((s) => ({ source: s.source.trim(), target: s.target.trim() }))
+      .filter((s) => s.source || s.target)
+    return { ...meta, endedAt: Date.now(), segments: lines }
+  }
+
+  async function saveSession(): Promise<void> {
+    const record = sessionRecord()
+    if (record && record.segments.length) await window.api.saveHistory(record)
+  }
+
+  function closeLine(): void {
+    if (segmenterRef.current.close(Date.now())) setSegments(segmenterRef.current.segments)
+  }
 
   // Microphone consent is decided ONCE by the main process via the native macOS API
   // (askForMediaAccess, only while status is 'not-determined'). Only after the OS reports
@@ -210,6 +237,9 @@ export default function App(): React.JSX.Element {
     client?.close()
     await systemCapture?.stop()
     await microphoneCapture?.stop()
+    closeLine()
+    await saveSession()
+    setActiveSessionId(null)
     setLevel(0)
     if (outcome.error) {
       setStatus('error')
@@ -235,8 +265,20 @@ export default function App(): React.JSX.Element {
 
     setStatus('connecting')
     setMessage(isSystem ? 'Connecting — preparing system audio…' : 'Connecting — preparing microphone…')
-    setOriginal('')
-    setTranslated('')
+    const startedAt = Date.now()
+    const meta: SessionMeta = {
+      id: newSessionId(startedAt),
+      startedAt,
+      sourceLang,
+      targetLang,
+      audioSource: isSystem
+        ? 'System audio'
+        : (audioDevices.find((d) => d.deviceId === audioSourceId)?.label ?? 'Microphone')
+    }
+    sessionMetaRef.current = meta
+    setActiveSessionId(meta.id)
+    segmenterRef.current.reset()
+    setSegments([])
     void window.api.debugLog('app.start', { audioSourceId, sourceLang, targetLang })
 
     // Permissions are requested once when the app starts. A translation session
@@ -294,6 +336,7 @@ export default function App(): React.JSX.Element {
         },
         onReconnecting: (attempt) => {
           if (!isCurrent()) return
+          closeLine()
           setStatus('connecting')
           setMessage(attempt === 0 ? 'Session rotating — reconnecting…' : `Connection dropped — reconnecting (attempt ${attempt})…`)
         },
@@ -303,15 +346,17 @@ export default function App(): React.JSX.Element {
           setMessage('Reconnected — resuming translation.')
         },
         onInputTranscript: (t) => {
-          if (isCurrent()) setOriginal((p) => appendCapped(p, t))
+          if (!isCurrent()) return
+          segmenterRef.current.addSource(t, Date.now())
+          setSegments(segmenterRef.current.segments)
         },
         onOutputTranscript: (t) => {
-          if (isCurrent()) setTranslated((p) => appendCapped(p, t))
+          if (!isCurrent()) return
+          segmenterRef.current.addTarget(t, Date.now())
+          setSegments(segmenterRef.current.segments)
         },
         onTurnComplete: () => {
-          if (!isCurrent()) return
-          setOriginal((p) => (p.endsWith('\n') ? p : p + '\n'))
-          setTranslated((p) => (p.endsWith('\n') ? p : p + '\n'))
+          if (isCurrent()) closeLine()
         },
         onInterrupted: () => {},
         onError: (m) => {
@@ -397,6 +442,13 @@ export default function App(): React.JSX.Element {
             {STATUS_LABEL[status]}
           </span>
           <button
+            onClick={() => setShowHistory(true)}
+            className="grid h-8 w-8 place-items-center rounded-lg border border-border bg-surface text-muted transition hover:border-border-strong hover:text-foreground"
+            title="History"
+          >
+            <HistoryIcon />
+          </button>
+          <button
             onClick={() => setShowSettings(true)}
             className="grid h-8 w-8 place-items-center rounded-lg border border-border bg-surface text-muted transition hover:border-border-strong hover:text-foreground"
             title="Settings"
@@ -408,22 +460,26 @@ export default function App(): React.JSX.Element {
       </header>
 
       {/* ---- Transcripts ---- */}
-      <main className="grid min-h-0 flex-1 grid-cols-2 gap-3 px-4 pb-3 pt-3">
-        <Column
-          title={sourceName}
-          accent={false}
-          innerRef={origRef}
-          text={original}
-          live={running}
-          empty="Source speech appears here."
-        />
-        <Column
-          title={`Translation · ${targetName}`}
-          accent
-          innerRef={transRef}
-          text={translated}
-          live={running}
-          empty="Translated text appears here."
+      <main className="flex min-h-0 flex-1 flex-col px-4 pb-3 pt-3">
+        <Transcript
+          lines={segments}
+          sourceTitle={sourceName}
+          targetTitle={`Translation · ${targetName}`}
+          live={running && segments.length > 0}
+          emptyText={
+            running
+              ? 'Waiting for speech…'
+              : 'Press “Enable translation”. Each spoken line appears here next to its translation.'
+          }
+          actions={
+            <ExportMenu
+              getSession={sessionRecord}
+              disabled={segments.length === 0}
+              onResult={setMessage}
+              direction="down"
+              compact
+            />
+          }
         />
       </main>
 
@@ -432,7 +488,7 @@ export default function App(): React.JSX.Element {
         <div className="flex items-center gap-3">
           <button
             onClick={toggle}
-            className={`flex h-10 items-center gap-2 rounded-lg px-4 text-[13px] font-semibold transition active:scale-[0.98] ${
+            className={`flex h-10 shrink-0 items-center gap-2 whitespace-nowrap rounded-lg px-4 text-[13px] font-semibold transition active:scale-[0.98] ${
               running
                 ? 'border border-border-strong bg-surface-2 text-red-300 hover:bg-elevated'
                 : 'bg-accent text-accent-fg shadow-[0_1px_0_rgba(255,255,255,0.12)_inset,0_2px_8px_rgba(20,184,166,0.25)] hover:bg-accent-hover'
@@ -466,7 +522,6 @@ export default function App(): React.JSX.Element {
           </div>
           <Meter level={level} active={running} />
         </div>
-
       </footer>
 
       {/* ---- Status line ---- */}
@@ -475,6 +530,14 @@ export default function App(): React.JSX.Element {
       </div>
 
       {/* ---- Settings modal ---- */}
+      {showHistory && (
+        <HistoryModal
+          onClose={() => setShowHistory(false)}
+          activeSessionId={activeSessionId}
+          onMessage={setMessage}
+        />
+      )}
+
       {showSettings && (
         <SettingsModal
           onClose={() => setShowSettings(false)}
@@ -491,50 +554,6 @@ export default function App(): React.JSX.Element {
     </div>
   )
 }
-
-/* =========================== Transcript column =========================== */
-
-// Memoized so frequent VU-meter updates don't re-render the growing transcript text.
-const Column = memo(function Column(props: {
-  title: string
-  accent: boolean
-  text: string
-  empty: string
-  live: boolean
-  innerRef: React.RefObject<HTMLDivElement | null>
-}): React.JSX.Element {
-  return (
-    <section className="flex min-h-0 flex-col overflow-hidden rounded-xl border border-border bg-surface/40">
-      <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
-        <span
-          className={`text-[11px] font-semibold uppercase tracking-[0.08em] ${
-            props.accent ? 'text-accent' : 'text-muted'
-          }`}
-        >
-          {props.title}
-        </span>
-        {props.live && props.text && (
-          <span className="flex items-center gap-1.5 text-[10px] text-faint">
-            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
-            live
-          </span>
-        )}
-      </div>
-      <div
-        ref={props.innerRef}
-        className="flex-1 overflow-y-auto px-4 py-3.5 text-[15px] leading-relaxed"
-      >
-        {props.text ? (
-          <p className="whitespace-pre-wrap text-foreground/90">{props.text}</p>
-        ) : (
-          <div className="flex h-full items-center justify-center">
-            <p className="max-w-[18rem] text-center text-[13px] text-faint">{props.empty}</p>
-          </div>
-        )}
-      </div>
-    </section>
-  )
-})
 
 /* =========================== VU meter =========================== */
 
@@ -771,6 +790,15 @@ function HeadphonesIcon(): React.JSX.Element {
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M3 14v-2a9 9 0 0 1 18 0v2" />
       <path d="M21 15a2 2 0 0 1-2 2h-1v-5h1a2 2 0 0 1 2 2zM3 15a2 2 0 0 0 2 2h1v-5H5a2 2 0 0 0-2 2z" />
+    </svg>
+  )
+}
+
+function HistoryIcon(): React.JSX.Element {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 12a9 9 0 1 0 3-6.7L3 8" />
+      <path d="M3 3v5h5M12 7v5l3 2" />
     </svg>
   )
 }

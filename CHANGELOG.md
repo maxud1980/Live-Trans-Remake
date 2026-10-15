@@ -1,5 +1,11 @@
 ## [0.1.13] — 2026-10-15
 
+### Added
+- Paired transcript: each spoken line is shown next to its translation instead of two separate text blocks. Lines are split by pauses; a translation that lags behind is attached to the right line, and a line already in the target language (no translation) does not take the next speaker's translation.
+- History: every session is saved automatically on this device (every 10 s and on stop) and can be re-read, exported or deleted from the History window.
+- Export to .txt (original + translation, translation only, or original only) and copy to clipboard. No timecodes: in live use the audio often comes from different parts of a video.
+- Unit tests for the line pairing and the text export (`bun test`).
+
 ### Fixed
 - A failed capture start, an API error or a dropped connection no longer leaves the Gemini session open in the background. Every failure path now goes through one teardown that stops capture and closes the socket.
 - Audio captured while the session reconnects (goAway rotation or network loss) is buffered (up to 3 s) and sent once the new session is ready, instead of being dropped.

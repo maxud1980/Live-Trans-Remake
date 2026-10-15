@@ -10,6 +10,19 @@ export type AppSettings = {
   platform: string
 }
 
+export type HistorySegment = { source: string; target: string }
+export type HistoryRecord = {
+  id: string
+  startedAt: number
+  endedAt: number
+  sourceLang: string
+  targetLang: string
+  audioSource: string
+  segments: HistorySegment[]
+}
+export type HistorySummary = Omit<HistoryRecord, 'segments'> & { segmentCount: number; preview: string }
+export type SaveTextResult = { ok: boolean; path?: string; canceled?: boolean; error?: string }
+
 export type LiveTokenResult = { ok: true; token: string } | { ok: false; error: string }
 
 // Mirror of the main-process flag, so disabled logging costs no IPC round-trip at all.
@@ -36,6 +49,14 @@ const api = {
   }): Promise<boolean> => ipcRenderer.invoke('settings:setPrefs', prefs),
   // Short-lived Live API token minted by the main process; the API key never enters the renderer.
   createLiveToken: (): Promise<LiveTokenResult> => ipcRenderer.invoke('live:createToken'),
+  // Session history (JSON files in userData/history) and plain-text export.
+  saveHistory: (record: HistoryRecord): Promise<boolean> => ipcRenderer.invoke('history:save', record),
+  listHistory: (): Promise<HistorySummary[]> => ipcRenderer.invoke('history:list'),
+  getHistory: (id: string): Promise<HistoryRecord | null> => ipcRenderer.invoke('history:get', id),
+  deleteHistory: (id: string): Promise<boolean> => ipcRenderer.invoke('history:delete', id),
+  saveTextFile: (defaultName: string, content: string): Promise<SaveTextResult> =>
+    ipcRenderer.invoke('export:saveText', defaultName, content),
+  copyText: (text: string): Promise<boolean> => ipcRenderer.invoke('clipboard:writeText', text),
   microphonePermissionStatus: (): Promise<string> => ipcRenderer.invoke('perm:microphoneStatus'),
   requestMicrophonePermission: (): Promise<boolean> => ipcRenderer.invoke('perm:requestMicrophone'),
   openMicrophoneSettings: (): Promise<void> => ipcRenderer.invoke('perm:openMicrophoneSettings'),

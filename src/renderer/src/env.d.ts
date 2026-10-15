@@ -10,6 +10,19 @@ export type AppSettings = {
   platform: string
 }
 
+export type HistorySegment = { source: string; target: string }
+export type HistoryRecord = {
+  id: string
+  startedAt: number
+  endedAt: number
+  sourceLang: string
+  targetLang: string
+  audioSource: string
+  segments: HistorySegment[]
+}
+export type HistorySummary = Omit<HistoryRecord, 'segments'> & { segmentCount: number; preview: string }
+export type SaveTextResult = { ok: boolean; path?: string; canceled?: boolean; error?: string }
+
 export type LiveTokenResult = { ok: true; token: string } | { ok: false; error: string }
 
 export interface PreloadApi {
@@ -25,6 +38,12 @@ export interface PreloadApi {
     audioSourceId?: string
   }) => Promise<boolean>
   createLiveToken: () => Promise<LiveTokenResult>
+  saveHistory: (record: HistoryRecord) => Promise<boolean>
+  listHistory: () => Promise<HistorySummary[]>
+  getHistory: (id: string) => Promise<HistoryRecord | null>
+  deleteHistory: (id: string) => Promise<boolean>
+  saveTextFile: (defaultName: string, content: string) => Promise<SaveTextResult>
+  copyText: (text: string) => Promise<boolean>
   microphonePermissionStatus: () => Promise<string>
   requestMicrophonePermission: () => Promise<boolean>
   openMicrophoneSettings: () => Promise<void>
